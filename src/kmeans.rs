@@ -1,11 +1,13 @@
 use ndarray::{Array2, ArrayView2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use rand_distr::WeightedIndex;
 use rand_distr::Distribution;
+use rand_distr::WeightedIndex;
 use rayon::prelude::*;
 
-use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
+use crate::distance::{
+    CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean,
+};
 use crate::error::ClusterError;
 use crate::utils::{assign_nearest_with, validate_data_generic};
 
@@ -92,9 +94,27 @@ pub fn run_kmeans_with_metric(
     metric: Metric,
 ) -> Result<KMeansState<f64>, ClusterError> {
     match metric {
-        Metric::Euclidean => run_kmeans_n_init_generic::<f64, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo),
-        Metric::Cosine => run_kmeans_n_init_generic::<f64, CosineDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
-        Metric::Manhattan => run_kmeans_n_init_generic::<f64, ManhattanDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
+        Metric::Euclidean => run_kmeans_n_init_generic::<f64, SquaredEuclidean>(
+            data, k, max_iter, tol, seed, n_init, algo,
+        ),
+        Metric::Cosine => run_kmeans_n_init_generic::<f64, CosineDistance>(
+            data,
+            k,
+            max_iter,
+            tol,
+            seed,
+            n_init,
+            Algorithm::Lloyd,
+        ),
+        Metric::Manhattan => run_kmeans_n_init_generic::<f64, ManhattanDistance>(
+            data,
+            k,
+            max_iter,
+            tol,
+            seed,
+            n_init,
+            Algorithm::Lloyd,
+        ),
     }
 }
 
@@ -110,9 +130,27 @@ pub fn run_kmeans_with_metric_f32(
     metric: Metric,
 ) -> Result<KMeansState<f32>, ClusterError> {
     match metric {
-        Metric::Euclidean => run_kmeans_n_init_generic::<f32, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo),
-        Metric::Cosine => run_kmeans_n_init_generic::<f32, CosineDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
-        Metric::Manhattan => run_kmeans_n_init_generic::<f32, ManhattanDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
+        Metric::Euclidean => run_kmeans_n_init_generic::<f32, SquaredEuclidean>(
+            data, k, max_iter, tol, seed, n_init, algo,
+        ),
+        Metric::Cosine => run_kmeans_n_init_generic::<f32, CosineDistance>(
+            data,
+            k,
+            max_iter,
+            tol,
+            seed,
+            n_init,
+            Algorithm::Lloyd,
+        ),
+        Metric::Manhattan => run_kmeans_n_init_generic::<f32, ManhattanDistance>(
+            data,
+            k,
+            max_iter,
+            tol,
+            seed,
+            n_init,
+            Algorithm::Lloyd,
+        ),
     }
 }
 
@@ -174,8 +212,26 @@ fn run_kmeans_single<F: Scalar, D: Distance<F>>(
     };
 
     match resolved {
-        Algorithm::Lloyd => run_lloyd_iterations::<F, D>(data_slice, &mut centroids, n, d, k, max_iter, tol, &mut rng),
-        Algorithm::Hamerly => crate::hamerly::run_hamerly_iterations::<F, D>(data_slice, &mut centroids, n, d, k, max_iter, tol, &mut rng),
+        Algorithm::Lloyd => run_lloyd_iterations::<F, D>(
+            data_slice,
+            &mut centroids,
+            n,
+            d,
+            k,
+            max_iter,
+            tol,
+            &mut rng,
+        ),
+        Algorithm::Hamerly => crate::hamerly::run_hamerly_iterations::<F, D>(
+            data_slice,
+            &mut centroids,
+            n,
+            d,
+            k,
+            max_iter,
+            tol,
+            &mut rng,
+        ),
         Algorithm::Auto => unreachable!(),
     }
 }
@@ -228,7 +284,8 @@ fn run_lloyd_iterations<F: Scalar, D: Distance<F>>(
         for cluster in 0..k {
             let start = cluster * d;
             let end = start + d;
-            let shift = D::distance(&old_centroid_buf[start..end], &new_slice[start..end]).to_f64_lossy();
+            let shift =
+                D::distance(&old_centroid_buf[start..end], &new_slice[start..end]).to_f64_lossy();
             if shift > max_shift {
                 max_shift = shift;
             }
@@ -261,13 +318,17 @@ pub fn kmeans_plus_plus_init<F: Scalar, D: Distance<F>>(
 
     let first = rng.gen_range(0..n);
     let first_row = &data_slice[first * d..(first + 1) * d];
-    centroids.row_mut(0).assign(&ndarray::ArrayView1::from(first_row));
+    centroids
+        .row_mut(0)
+        .assign(&ndarray::ArrayView1::from(first_row));
 
     let mut min_dists = vec![f64::MAX; n]; // sampling uses f64 for precision
 
     for c in 1..k {
         let last_centroid = centroids.row(c - 1);
-        let last_slice = last_centroid.as_slice().expect("centroid row is contiguous");
+        let last_slice = last_centroid
+            .as_slice()
+            .expect("centroid row is contiguous");
 
         for i in 0..n {
             let point = &data_slice[i * d..(i + 1) * d];
@@ -286,7 +347,9 @@ pub fn kmeans_plus_plus_init<F: Scalar, D: Distance<F>>(
         };
 
         let next_row = &data_slice[next * d..(next + 1) * d];
-        centroids.row_mut(c).assign(&ndarray::ArrayView1::from(next_row));
+        centroids
+            .row_mut(c)
+            .assign(&ndarray::ArrayView1::from(next_row));
     }
 
     centroids
@@ -315,7 +378,9 @@ pub(crate) fn recompute_centroids<F: Scalar>(
         }
     }
 
-    let centroid_slice = centroids.as_slice_mut().expect("centroids are C-contiguous");
+    let centroid_slice = centroids
+        .as_slice_mut()
+        .expect("centroids are C-contiguous");
     for cluster in 0..k {
         if counts[cluster] > 0 {
             let count = counts[cluster] as f64;
@@ -343,7 +408,9 @@ pub(crate) fn handle_empty_clusters<F: Scalar>(
         counts[label] += 1;
     }
 
-    let centroid_slice = centroids.as_slice_mut().expect("centroids are C-contiguous");
+    let centroid_slice = centroids
+        .as_slice_mut()
+        .expect("centroids are C-contiguous");
 
     for cluster in 0..k {
         if counts[cluster] == 0 {
@@ -377,7 +444,8 @@ pub(crate) fn compute_centroid_shifts<F: Scalar, D: Distance<F>>(
     for cluster in 0..k {
         let start = cluster * d;
         let end = start + d;
-        shifts[cluster] = D::distance(&old_slice[start..end], &new_slice[start..end]).to_f64_lossy();
+        shifts[cluster] =
+            D::distance(&old_slice[start..end], &new_slice[start..end]).to_f64_lossy();
     }
     shifts
 }
@@ -430,7 +498,9 @@ mod tests {
         for c in 0..2 {
             let centroid = centroids.row(c);
             let found = data.rows().into_iter().any(|row| {
-                row.iter().zip(centroid.iter()).all(|(a, b)| (a - b).abs() < 1e-10)
+                row.iter()
+                    .zip(centroid.iter())
+                    .all(|(a, b)| (a - b).abs() < 1e-10)
             });
             assert!(found, "Centroid {} not found in input data", c);
         }
@@ -439,7 +509,8 @@ mod tests {
     #[test]
     fn test_lloyd_converges_on_separated_clusters() {
         let data = well_separated_data();
-        let result = run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let result =
+            run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
 
         assert_eq!(result.labels.len(), 8);
         assert_eq!(result.centroids.shape(), &[2, 2]);
@@ -449,8 +520,12 @@ mod tests {
         let label_a = result.labels[0];
         let label_b = result.labels[4];
         assert_ne!(label_a, label_b);
-        for i in 0..4 { assert_eq!(result.labels[i], label_a); }
-        for i in 4..8 { assert_eq!(result.labels[i], label_b); }
+        for i in 0..4 {
+            assert_eq!(result.labels[i], label_a);
+        }
+        for i in 4..8 {
+            assert_eq!(result.labels[i], label_b);
+        }
     }
 
     #[test]
@@ -465,8 +540,10 @@ mod tests {
     #[test]
     fn test_n_init_selects_best() {
         let data = well_separated_data();
-        let single = run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
-        let multi = run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 10, Algorithm::Lloyd).unwrap();
+        let single =
+            run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let multi =
+            run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 10, Algorithm::Lloyd).unwrap();
         assert!(multi.inertia <= single.inertia + 1e-10);
     }
 
@@ -487,7 +564,8 @@ mod tests {
     #[test]
     fn test_single_cluster() {
         let data = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]];
-        let result = run_kmeans_n_init(&data.view(), 1, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let result =
+            run_kmeans_n_init(&data.view(), 1, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         assert!(result.labels.iter().all(|&l| l == 0));
         let center = result.centroids.row(0);
         assert!((center[0] - 3.0).abs() < 1e-10);
@@ -497,7 +575,8 @@ mod tests {
     #[test]
     fn test_k_equals_n() {
         let data = array![[1.0, 2.0], [10.0, 20.0], [100.0, 200.0]];
-        let result = run_kmeans_n_init(&data.view(), 3, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let result =
+            run_kmeans_n_init(&data.view(), 3, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         let mut sorted = result.labels.clone();
         sorted.sort();
         assert_eq!(sorted, vec![0, 1, 2]);
@@ -507,7 +586,8 @@ mod tests {
     #[test]
     fn test_identical_points() {
         let data = array![[5.0, 5.0], [5.0, 5.0], [5.0, 5.0], [5.0, 5.0]];
-        let result = run_kmeans_n_init(&data.view(), 1, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let result =
+            run_kmeans_n_init(&data.view(), 1, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         assert!(result.labels.iter().all(|&l| l == 0));
         assert!(result.inertia < 1e-10);
         assert_eq!(result.n_iter, 1);
@@ -536,7 +616,8 @@ mod tests {
     #[test]
     fn test_f32_lloyd_converges() {
         let data = well_separated_data_f32();
-        let result = run_kmeans_n_init_f32(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let result =
+            run_kmeans_n_init_f32(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         assert_eq!(result.labels.len(), 8);
         let label_a = result.labels[0];
         let label_b = result.labels[4];
@@ -546,7 +627,8 @@ mod tests {
     #[test]
     fn test_f32_hamerly_converges() {
         let data = well_separated_data_f32();
-        let result = run_kmeans_n_init_f32(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Hamerly).unwrap();
+        let result =
+            run_kmeans_n_init_f32(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Hamerly).unwrap();
         assert_eq!(result.labels.len(), 8);
         let label_a = result.labels[0];
         let label_b = result.labels[4];
@@ -557,8 +639,10 @@ mod tests {
     fn test_f32_matches_f64_partition() {
         let data_f64 = well_separated_data();
         let data_f32 = well_separated_data_f32();
-        let r64 = run_kmeans_n_init(&data_f64.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
-        let r32 = run_kmeans_n_init_f32(&data_f32.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let r64 =
+            run_kmeans_n_init(&data_f64.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let r32 =
+            run_kmeans_n_init_f32(&data_f32.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         // Same partitioning on well-separated data
         assert_eq!(r64.labels, r32.labels);
     }

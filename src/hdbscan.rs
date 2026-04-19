@@ -18,7 +18,9 @@
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 
-use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
+use crate::distance::{
+    CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean,
+};
 use crate::error::ClusterError;
 use crate::kdtree::{BBoxDistance, KdTree};
 use crate::utils::validate_data_generic;
@@ -59,9 +61,24 @@ pub fn run_hdbscan_with_metric(
     selection: ClusterSelectionMethod,
 ) -> Result<HdbscanState<f64>, ClusterError> {
     match metric {
-        Metric::Euclidean => run_hdbscan_accelerated::<f64, SquaredEuclidean, SquaredEuclidean>(data, min_cluster_size, min_samples, selection),
-        Metric::Cosine => run_hdbscan_generic::<f64, CosineDistance>(data, min_cluster_size, min_samples, selection),
-        Metric::Manhattan => run_hdbscan_accelerated::<f64, ManhattanDistance, ManhattanDistance>(data, min_cluster_size, min_samples, selection),
+        Metric::Euclidean => run_hdbscan_accelerated::<f64, SquaredEuclidean, SquaredEuclidean>(
+            data,
+            min_cluster_size,
+            min_samples,
+            selection,
+        ),
+        Metric::Cosine => run_hdbscan_generic::<f64, CosineDistance>(
+            data,
+            min_cluster_size,
+            min_samples,
+            selection,
+        ),
+        Metric::Manhattan => run_hdbscan_accelerated::<f64, ManhattanDistance, ManhattanDistance>(
+            data,
+            min_cluster_size,
+            min_samples,
+            selection,
+        ),
     }
 }
 
@@ -73,9 +90,24 @@ pub fn run_hdbscan_with_metric_f32(
     selection: ClusterSelectionMethod,
 ) -> Result<HdbscanState<f32>, ClusterError> {
     match metric {
-        Metric::Euclidean => run_hdbscan_accelerated::<f32, SquaredEuclidean, SquaredEuclidean>(data, min_cluster_size, min_samples, selection),
-        Metric::Cosine => run_hdbscan_generic::<f32, CosineDistance>(data, min_cluster_size, min_samples, selection),
-        Metric::Manhattan => run_hdbscan_accelerated::<f32, ManhattanDistance, ManhattanDistance>(data, min_cluster_size, min_samples, selection),
+        Metric::Euclidean => run_hdbscan_accelerated::<f32, SquaredEuclidean, SquaredEuclidean>(
+            data,
+            min_cluster_size,
+            min_samples,
+            selection,
+        ),
+        Metric::Cosine => run_hdbscan_generic::<f32, CosineDistance>(
+            data,
+            min_cluster_size,
+            min_samples,
+            selection,
+        ),
+        Metric::Manhattan => run_hdbscan_accelerated::<f32, ManhattanDistance, ManhattanDistance>(
+            data,
+            min_cluster_size,
+            min_samples,
+            selection,
+        ),
     }
 }
 
@@ -142,12 +174,19 @@ fn run_hdbscan_accelerated<F: Scalar, D: Distance<F>, B: BBoxDistance>(
 
     let n_clusters = {
         let mut unique = std::collections::HashSet::new();
-        for &l in &labels { if l >= 0 { unique.insert(l); } }
+        for &l in &labels {
+            if l >= 0 {
+                unique.insert(l);
+            }
+        }
         unique.len()
     };
 
     Ok(HdbscanState {
-        labels, probabilities, cluster_persistence: persistence, n_clusters,
+        labels,
+        probabilities,
+        cluster_persistence: persistence,
+        n_clusters,
         _phantom: std::marker::PhantomData,
     })
 }
@@ -236,13 +275,19 @@ fn compute_core_distances<F: Scalar, D: Distance<F>>(
                     if i == j {
                         0.0
                     } else {
-                        D::to_metric(D::distance(point_i, &data_slice[j * d..(j + 1) * d]).to_f64_lossy())
+                        D::to_metric(
+                            D::distance(point_i, &data_slice[j * d..(j + 1) * d]).to_f64_lossy(),
+                        )
                     }
                 })
                 .collect();
             dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             // k-th nearest neighbor (index k-1 since index 0 is self with distance 0)
-            if k < dists.len() { dists[k] } else { *dists.last().unwrap_or(&0.0) }
+            if k < dists.len() {
+                dists[k]
+            } else {
+                *dists.last().unwrap_or(&0.0)
+            }
         })
         .collect()
 }
@@ -363,7 +408,8 @@ fn condense_and_extract(
     let mut lambda_birth: Vec<f64> = vec![0.0; n_nodes];
 
     // Map original UF root IDs to internal node IDs
-    let mut root_to_node: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut root_to_node: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
     for i in 0..n {
         root_to_node.insert(i, i); // initially each point is its own node
     }
@@ -376,7 +422,11 @@ fn condense_and_extract(
         children[internal_id] = (node_a, node_b);
         node_size[internal_id] = size;
 
-        let lambda = if distance > 0.0 { 1.0 / distance } else { f64::MAX };
+        let lambda = if distance > 0.0 {
+            1.0 / distance
+        } else {
+            f64::MAX
+        };
         lambda_birth[internal_id] = lambda;
 
         // The merged root now maps to this internal node
@@ -398,10 +448,14 @@ fn condense_and_extract(
 
     // Condensed cluster info
     let mut condensed_clusters: Vec<usize> = vec![root]; // IDs of condensed clusters
-    let mut cluster_lambda_birth: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
-    let mut cluster_lambda_death: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
-    let mut cluster_stability: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
-    let mut cluster_children: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    let mut cluster_lambda_birth: std::collections::HashMap<usize, f64> =
+        std::collections::HashMap::new();
+    let mut cluster_lambda_death: std::collections::HashMap<usize, f64> =
+        std::collections::HashMap::new();
+    let mut cluster_stability: std::collections::HashMap<usize, f64> =
+        std::collections::HashMap::new();
+    let mut cluster_children: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
 
     cluster_lambda_birth.insert(root, lambda_birth[root]);
 
@@ -431,26 +485,68 @@ fn condense_and_extract(
             // Left child becomes a new condensed cluster
             condensed_clusters.push(left);
             cluster_lambda_birth.insert(left, lambda);
-            cluster_children.entry(current_cluster).or_default().push(left);
+            cluster_children
+                .entry(current_cluster)
+                .or_default()
+                .push(left);
             stack.push((left, left));
 
             // Right child becomes a new condensed cluster
             condensed_clusters.push(right);
             cluster_lambda_birth.insert(right, lambda);
-            cluster_children.entry(current_cluster).or_default().push(right);
+            cluster_children
+                .entry(current_cluster)
+                .or_default()
+                .push(right);
             stack.push((right, right));
         } else if left_big {
             // Only left is big enough — right's points "fall out" as noise candidates
             // Assign right subtree points with their lambda
-            assign_subtree_points(right, n, &children, &node_size, current_cluster, lambda, &mut point_cluster, &mut point_lambda);
+            assign_subtree_points(
+                right,
+                n,
+                &children,
+                &node_size,
+                current_cluster,
+                lambda,
+                &mut point_cluster,
+                &mut point_lambda,
+            );
             stack.push((left, current_cluster));
         } else if right_big {
-            assign_subtree_points(left, n, &children, &node_size, current_cluster, lambda, &mut point_cluster, &mut point_lambda);
+            assign_subtree_points(
+                left,
+                n,
+                &children,
+                &node_size,
+                current_cluster,
+                lambda,
+                &mut point_cluster,
+                &mut point_lambda,
+            );
             stack.push((right, current_cluster));
         } else {
             // Neither child is big enough — all points fall out
-            assign_subtree_points(left, n, &children, &node_size, current_cluster, lambda, &mut point_cluster, &mut point_lambda);
-            assign_subtree_points(right, n, &children, &node_size, current_cluster, lambda, &mut point_cluster, &mut point_lambda);
+            assign_subtree_points(
+                left,
+                n,
+                &children,
+                &node_size,
+                current_cluster,
+                lambda,
+                &mut point_cluster,
+                &mut point_lambda,
+            );
+            assign_subtree_points(
+                right,
+                n,
+                &children,
+                &node_size,
+                current_cluster,
+                lambda,
+                &mut point_cluster,
+                &mut point_lambda,
+            );
         }
     }
 
@@ -480,7 +576,9 @@ fn condense_and_extract(
 
     // Stage 6: Extract flat clusters
     let selected = match selection {
-        ClusterSelectionMethod::Eom => select_eom(&condensed_clusters, &cluster_stability, &cluster_children),
+        ClusterSelectionMethod::Eom => {
+            select_eom(&condensed_clusters, &cluster_stability, &cluster_children)
+        }
         ClusterSelectionMethod::Leaf => select_leaf(&condensed_clusters, &cluster_children),
     };
 
@@ -606,9 +704,7 @@ fn select_leaf(
 ) -> Vec<usize> {
     let mut result: Vec<usize> = clusters
         .iter()
-        .filter(|&&c| {
-            children_map.get(&c).map_or(true, |v| v.is_empty())
-        })
+        .filter(|&&c| children_map.get(&c).map_or(true, |v| v.is_empty()))
         .copied()
         .collect();
     result.sort();
@@ -667,12 +763,25 @@ mod tests {
     #[test]
     fn test_two_clusters() {
         let data = array![
-            [0.0, 0.0], [0.1, 0.0], [0.0, 0.1], [0.1, 0.1], [0.05, 0.05],
-            [10.0, 10.0], [10.1, 10.0], [10.0, 10.1], [10.1, 10.1], [10.05, 10.05],
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.1],
+            [0.05, 0.05],
+            [10.0, 10.0],
+            [10.1, 10.0],
+            [10.0, 10.1],
+            [10.1, 10.1],
+            [10.05, 10.05],
         ];
         let result = run_hdbscan_with_metric(
-            &data.view(), 3, 3, Metric::Euclidean, ClusterSelectionMethod::Eom,
-        ).unwrap();
+            &data.view(),
+            3,
+            3,
+            Metric::Euclidean,
+            ClusterSelectionMethod::Eom,
+        )
+        .unwrap();
         assert_eq!(result.labels.len(), 10);
         assert_eq!(result.n_clusters, 2);
         let c1 = result.labels[0];
@@ -685,13 +794,26 @@ mod tests {
     #[test]
     fn test_noise_detection() {
         let data = array![
-            [0.0, 0.0], [0.1, 0.0], [0.0, 0.1], [0.1, 0.1], [0.05, 0.05],
-            [10.0, 10.0], [10.1, 10.0], [10.0, 10.1], [10.1, 10.1], [10.05, 10.05],
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.1],
+            [0.05, 0.05],
+            [10.0, 10.0],
+            [10.1, 10.0],
+            [10.0, 10.1],
+            [10.1, 10.1],
+            [10.05, 10.05],
             [50.0, 50.0], // outlier
         ];
         let result = run_hdbscan_with_metric(
-            &data.view(), 3, 3, Metric::Euclidean, ClusterSelectionMethod::Eom,
-        ).unwrap();
+            &data.view(),
+            3,
+            3,
+            Metric::Euclidean,
+            ClusterSelectionMethod::Eom,
+        )
+        .unwrap();
         assert_eq!(result.labels[10], -1); // outlier is noise
     }
 
@@ -700,8 +822,13 @@ mod tests {
         let data = array![[0.0, 0.0], [10.0, 10.0]];
         // min_cluster_size=3 but only 2 points
         let result = run_hdbscan_with_metric(
-            &data.view(), 3, 2, Metric::Euclidean, ClusterSelectionMethod::Eom,
-        ).unwrap();
+            &data.view(),
+            3,
+            2,
+            Metric::Euclidean,
+            ClusterSelectionMethod::Eom,
+        )
+        .unwrap();
         assert!(result.labels.iter().all(|&l| l == -1));
         assert_eq!(result.n_clusters, 0);
     }
@@ -709,12 +836,25 @@ mod tests {
     #[test]
     fn test_probabilities_range() {
         let data = array![
-            [0.0, 0.0], [0.1, 0.0], [0.0, 0.1], [0.1, 0.1], [0.05, 0.05],
-            [10.0, 10.0], [10.1, 10.0], [10.0, 10.1], [10.1, 10.1], [10.05, 10.05],
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.1],
+            [0.05, 0.05],
+            [10.0, 10.0],
+            [10.1, 10.0],
+            [10.0, 10.1],
+            [10.1, 10.1],
+            [10.05, 10.05],
         ];
         let result = run_hdbscan_with_metric(
-            &data.view(), 3, 3, Metric::Euclidean, ClusterSelectionMethod::Eom,
-        ).unwrap();
+            &data.view(),
+            3,
+            3,
+            Metric::Euclidean,
+            ClusterSelectionMethod::Eom,
+        )
+        .unwrap();
         for &p in &result.probabilities {
             assert!((0.0..=1.0).contains(&p));
         }
@@ -723,11 +863,31 @@ mod tests {
     #[test]
     fn test_deterministic() {
         let data = array![
-            [0.0, 0.0], [0.1, 0.0], [0.0, 0.1], [0.1, 0.1],
-            [10.0, 10.0], [10.1, 10.0], [10.0, 10.1], [10.1, 10.1],
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.1],
+            [10.0, 10.0],
+            [10.1, 10.0],
+            [10.0, 10.1],
+            [10.1, 10.1],
         ];
-        let r1 = run_hdbscan_with_metric(&data.view(), 2, 2, Metric::Euclidean, ClusterSelectionMethod::Eom).unwrap();
-        let r2 = run_hdbscan_with_metric(&data.view(), 2, 2, Metric::Euclidean, ClusterSelectionMethod::Eom).unwrap();
+        let r1 = run_hdbscan_with_metric(
+            &data.view(),
+            2,
+            2,
+            Metric::Euclidean,
+            ClusterSelectionMethod::Eom,
+        )
+        .unwrap();
+        let r2 = run_hdbscan_with_metric(
+            &data.view(),
+            2,
+            2,
+            Metric::Euclidean,
+            ClusterSelectionMethod::Eom,
+        )
+        .unwrap();
         assert_eq!(r1.labels, r2.labels);
         assert_eq!(r1.probabilities, r2.probabilities);
     }
@@ -735,12 +895,23 @@ mod tests {
     #[test]
     fn test_leaf_selection() {
         let data = array![
-            [0.0, 0.0], [0.1, 0.0], [0.0, 0.1], [0.1, 0.1],
-            [10.0, 10.0], [10.1, 10.0], [10.0, 10.1], [10.1, 10.1],
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.1],
+            [10.0, 10.0],
+            [10.1, 10.0],
+            [10.0, 10.1],
+            [10.1, 10.1],
         ];
         let result = run_hdbscan_with_metric(
-            &data.view(), 2, 2, Metric::Euclidean, ClusterSelectionMethod::Leaf,
-        ).unwrap();
+            &data.view(),
+            2,
+            2,
+            Metric::Euclidean,
+            ClusterSelectionMethod::Leaf,
+        )
+        .unwrap();
         assert!(result.n_clusters >= 1);
     }
 
@@ -748,7 +919,13 @@ mod tests {
     fn test_invalid_min_cluster_size() {
         let data = array![[0.0, 0.0], [1.0, 1.0]];
         assert!(matches!(
-            run_hdbscan_with_metric(&data.view(), 1, 1, Metric::Euclidean, ClusterSelectionMethod::Eom),
+            run_hdbscan_with_metric(
+                &data.view(),
+                1,
+                1,
+                Metric::Euclidean,
+                ClusterSelectionMethod::Eom
+            ),
             Err(ClusterError::InvalidMinClusterSize(_))
         ));
     }
@@ -757,7 +934,13 @@ mod tests {
     fn test_invalid_min_samples() {
         let data = array![[0.0, 0.0], [1.0, 1.0]];
         assert!(matches!(
-            run_hdbscan_with_metric(&data.view(), 2, 0, Metric::Euclidean, ClusterSelectionMethod::Eom),
+            run_hdbscan_with_metric(
+                &data.view(),
+                2,
+                0,
+                Metric::Euclidean,
+                ClusterSelectionMethod::Eom
+            ),
             Err(ClusterError::InvalidMinSamples(_))
         ));
     }
@@ -766,7 +949,13 @@ mod tests {
     fn test_empty_input() {
         let data = Array2::<f64>::zeros((0, 2));
         assert!(matches!(
-            run_hdbscan_with_metric(&data.view(), 2, 2, Metric::Euclidean, ClusterSelectionMethod::Eom),
+            run_hdbscan_with_metric(
+                &data.view(),
+                2,
+                2,
+                Metric::Euclidean,
+                ClusterSelectionMethod::Eom
+            ),
             Err(ClusterError::EmptyInput)
         ));
     }
@@ -774,12 +963,23 @@ mod tests {
     #[test]
     fn test_f32() {
         let data = array![
-            [0.0f32, 0.0], [0.1, 0.0], [0.0, 0.1], [0.1, 0.1],
-            [10.0, 10.0], [10.1, 10.0], [10.0, 10.1], [10.1, 10.1],
+            [0.0f32, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.1],
+            [10.0, 10.0],
+            [10.1, 10.0],
+            [10.0, 10.1],
+            [10.1, 10.1],
         ];
         let result = run_hdbscan_with_metric_f32(
-            &data.view(), 2, 2, Metric::Euclidean, ClusterSelectionMethod::Eom,
-        ).unwrap();
+            &data.view(),
+            2,
+            2,
+            Metric::Euclidean,
+            ClusterSelectionMethod::Eom,
+        )
+        .unwrap();
         assert_eq!(result.labels.len(), 8);
         assert!(result.n_clusters >= 1);
     }
@@ -787,12 +987,23 @@ mod tests {
     #[test]
     fn test_cosine_metric() {
         let data = array![
-            [1.0, 0.0], [0.99, 0.01], [0.98, 0.02], [0.97, 0.03],
-            [0.0, 1.0], [0.01, 0.99], [0.02, 0.98], [0.03, 0.97],
+            [1.0, 0.0],
+            [0.99, 0.01],
+            [0.98, 0.02],
+            [0.97, 0.03],
+            [0.0, 1.0],
+            [0.01, 0.99],
+            [0.02, 0.98],
+            [0.03, 0.97],
         ];
         let result = run_hdbscan_with_metric(
-            &data.view(), 2, 2, Metric::Cosine, ClusterSelectionMethod::Eom,
-        ).unwrap();
+            &data.view(),
+            2,
+            2,
+            Metric::Cosine,
+            ClusterSelectionMethod::Eom,
+        )
+        .unwrap();
         assert_eq!(result.labels.len(), 8);
     }
 
@@ -812,12 +1023,25 @@ mod tests {
     #[test]
     fn test_cluster_persistence_non_negative() {
         let data = array![
-            [0.0, 0.0], [0.1, 0.0], [0.0, 0.1], [0.1, 0.1], [0.05, 0.05],
-            [10.0, 10.0], [10.1, 10.0], [10.0, 10.1], [10.1, 10.1], [10.05, 10.05],
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.1],
+            [0.05, 0.05],
+            [10.0, 10.0],
+            [10.1, 10.0],
+            [10.0, 10.1],
+            [10.1, 10.1],
+            [10.05, 10.05],
         ];
         let result = run_hdbscan_with_metric(
-            &data.view(), 3, 3, Metric::Euclidean, ClusterSelectionMethod::Eom,
-        ).unwrap();
+            &data.view(),
+            3,
+            3,
+            Metric::Euclidean,
+            ClusterSelectionMethod::Eom,
+        )
+        .unwrap();
         for &p in &result.cluster_persistence {
             assert!(p >= 0.0);
         }

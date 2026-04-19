@@ -111,7 +111,12 @@ pub fn run_hamerly_iterations<F: Scalar, D: Distance<F>>(
                 let (new_label, best_dist, second_dist) =
                     assign_nearest_two_with::<F, D>(point, centroids_slice, k, d);
 
-                Some((i, new_label, best_dist.to_f64_lossy().sqrt(), second_dist.to_f64_lossy().sqrt()))
+                Some((
+                    i,
+                    new_label,
+                    best_dist.to_f64_lossy().sqrt(),
+                    second_dist.to_f64_lossy().sqrt(),
+                ))
             })
             .collect();
 
@@ -208,7 +213,9 @@ fn handle_empty_clusters_hamerly<F: Scalar>(
         counts[label] += 1;
     }
 
-    let centroid_slice = centroids.as_slice_mut().expect("centroids are C-contiguous");
+    let centroid_slice = centroids
+        .as_slice_mut()
+        .expect("centroids are C-contiguous");
 
     for cluster in 0..k {
         if counts[cluster] == 0 {
@@ -256,16 +263,31 @@ mod tests {
         let data = well_separated_data();
         let data_slice = data.as_slice().unwrap();
         let mut rng = StdRng::seed_from_u64(42);
-        let mut centroids = kmeans_plus_plus_init::<f64, SquaredEuclidean>(&data.view(), 2, &mut rng);
+        let mut centroids =
+            kmeans_plus_plus_init::<f64, SquaredEuclidean>(&data.view(), 2, &mut rng);
 
-        let result = run_hamerly_iterations::<f64, SquaredEuclidean>(data_slice, &mut centroids, 8, 2, 2, 100, 1e-4, &mut rng).unwrap();
+        let result = run_hamerly_iterations::<f64, SquaredEuclidean>(
+            data_slice,
+            &mut centroids,
+            8,
+            2,
+            2,
+            100,
+            1e-4,
+            &mut rng,
+        )
+        .unwrap();
 
         assert_eq!(result.labels.len(), 8);
         let label_a = result.labels[0];
         let label_b = result.labels[4];
         assert_ne!(label_a, label_b);
-        for i in 0..4 { assert_eq!(result.labels[i], label_a); }
-        for i in 4..8 { assert_eq!(result.labels[i], label_b); }
+        for i in 0..4 {
+            assert_eq!(result.labels[i], label_a);
+        }
+        for i in 4..8 {
+            assert_eq!(result.labels[i], label_b);
+        }
     }
 
     #[test]
@@ -273,8 +295,11 @@ mod tests {
         let data = well_separated_data();
         let view = data.view();
 
-        let lloyd = crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
-        let hamerly = crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Hamerly).unwrap();
+        let lloyd =
+            crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let hamerly =
+            crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Hamerly)
+                .unwrap();
 
         assert_eq!(lloyd.labels, hamerly.labels);
         assert!((lloyd.inertia - hamerly.inertia).abs() < 1e-6);
@@ -285,8 +310,10 @@ mod tests {
         let data = well_separated_data();
         let view = data.view();
 
-        let r1 = crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Hamerly).unwrap();
-        let r2 = crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Hamerly).unwrap();
+        let r1 = crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Hamerly)
+            .unwrap();
+        let r2 = crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Hamerly)
+            .unwrap();
 
         assert_eq!(r1.labels, r2.labels);
         assert!((r1.inertia - r2.inertia).abs() < 1e-10);
@@ -310,7 +337,9 @@ mod tests {
         let data = Array2::from_shape_vec((150, 3), data_vec).unwrap();
         let view = data.view();
 
-        let result = crate::kmeans::run_kmeans_n_init(&view, 3, 100, 1e-4, 42, 1, Algorithm::Hamerly).unwrap();
+        let result =
+            crate::kmeans::run_kmeans_n_init(&view, 3, 100, 1e-4, 42, 1, Algorithm::Hamerly)
+                .unwrap();
         assert_eq!(result.labels.len(), 150);
         assert!(result.inertia >= 0.0);
         let unique: std::collections::HashSet<_> = result.labels.iter().collect();

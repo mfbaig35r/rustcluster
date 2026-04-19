@@ -11,7 +11,9 @@ use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
-use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
+use crate::distance::{
+    CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean,
+};
 use crate::error::ClusterError;
 use crate::kdtree::{BBoxDistance, KdTree};
 use crate::utils::validate_data_generic;
@@ -60,9 +62,17 @@ pub fn run_dbscan_with_metric(
         return Err(ClusterError::InvalidEps(eps));
     }
     match metric {
-        Metric::Euclidean => run_dbscan_accelerated::<f64, SquaredEuclidean, SquaredEuclidean>(data, eps * eps, min_samples),
+        Metric::Euclidean => run_dbscan_accelerated::<f64, SquaredEuclidean, SquaredEuclidean>(
+            data,
+            eps * eps,
+            min_samples,
+        ),
         Metric::Cosine => run_dbscan_generic::<f64, CosineDistance>(data, eps, min_samples),
-        Metric::Manhattan => run_dbscan_accelerated::<f64, ManhattanDistance, ManhattanDistance>(data, eps, min_samples),
+        Metric::Manhattan => run_dbscan_accelerated::<f64, ManhattanDistance, ManhattanDistance>(
+            data,
+            eps,
+            min_samples,
+        ),
     }
 }
 
@@ -77,9 +87,17 @@ pub fn run_dbscan_with_metric_f32(
         return Err(ClusterError::InvalidEps(eps));
     }
     match metric {
-        Metric::Euclidean => run_dbscan_accelerated::<f32, SquaredEuclidean, SquaredEuclidean>(data, eps * eps, min_samples),
+        Metric::Euclidean => run_dbscan_accelerated::<f32, SquaredEuclidean, SquaredEuclidean>(
+            data,
+            eps * eps,
+            min_samples,
+        ),
         Metric::Cosine => run_dbscan_generic::<f32, CosineDistance>(data, eps, min_samples),
-        Metric::Manhattan => run_dbscan_accelerated::<f32, ManhattanDistance, ManhattanDistance>(data, eps, min_samples),
+        Metric::Manhattan => run_dbscan_accelerated::<f32, ManhattanDistance, ManhattanDistance>(
+            data,
+            eps,
+            min_samples,
+        ),
     }
 }
 
@@ -139,7 +157,10 @@ fn run_dbscan_accelerated<F: Scalar, D: Distance<F>, B: BBoxDistance>(
     };
 
     // Rest is identical to run_dbscan_generic — reuse the cluster expansion
-    let is_core: Vec<bool> = neighbors.iter().map(|nbrs| nbrs.len() >= min_samples).collect();
+    let is_core: Vec<bool> = neighbors
+        .iter()
+        .map(|nbrs| nbrs.len() >= min_samples)
+        .collect();
     run_dbscan_cluster_expansion(data_slice, n, d, &neighbors, &is_core)
 }
 
@@ -180,7 +201,10 @@ fn run_dbscan_generic<F: Scalar, D: Distance<F>>(
         })
         .collect();
 
-    let is_core: Vec<bool> = neighbors.iter().map(|nbrs| nbrs.len() >= min_samples).collect();
+    let is_core: Vec<bool> = neighbors
+        .iter()
+        .map(|nbrs| nbrs.len() >= min_samples)
+        .collect();
     run_dbscan_cluster_expansion(data_slice, n, d, &neighbors, &is_core)
 }
 
@@ -219,7 +243,8 @@ fn run_dbscan_cluster_expansion<F: Scalar>(
     }
 
     let core_sample_indices: Vec<usize> = is_core
-        .iter().enumerate()
+        .iter()
+        .enumerate()
         .filter(|(_, &c)| c)
         .map(|(i, _)| i)
         .collect();
@@ -291,11 +316,7 @@ mod tests {
 
     #[test]
     fn test_all_noise() {
-        let data = array![
-            [0.0, 0.0],
-            [10.0, 10.0],
-            [20.0, 20.0],
-        ];
+        let data = array![[0.0, 0.0], [10.0, 10.0], [20.0, 20.0],];
         let result = run_dbscan(&data.view(), 0.1, 2).unwrap();
         assert!(result.labels.iter().all(|&l| l == -1));
         assert_eq!(result.n_clusters, 0);
@@ -304,12 +325,7 @@ mod tests {
 
     #[test]
     fn test_all_one_cluster() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.0],
-            [0.2, 0.0],
-            [0.3, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.0], [0.2, 0.0], [0.3, 0.0],];
         let result = run_dbscan(&data.view(), 1.0, 2).unwrap();
         assert_eq!(result.n_clusters, 1);
         assert!(result.labels.iter().all(|&l| l == 0));
@@ -318,10 +334,7 @@ mod tests {
     #[test]
     fn test_min_samples_one() {
         // Every point is a core point when min_samples=1
-        let data = array![
-            [0.0, 0.0],
-            [100.0, 100.0],
-        ];
+        let data = array![[0.0, 0.0], [100.0, 100.0],];
         let result = run_dbscan(&data.view(), 0.1, 1).unwrap();
         // Each point is its own cluster (too far for eps=0.1)
         assert_eq!(result.n_clusters, 2);
@@ -332,13 +345,7 @@ mod tests {
     #[test]
     fn test_chain() {
         // Points in a chain, each within eps of the next
-        let data = array![
-            [0.0, 0.0],
-            [0.5, 0.0],
-            [1.0, 0.0],
-            [1.5, 0.0],
-            [2.0, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [0.5, 0.0], [1.0, 0.0], [1.5, 0.0], [2.0, 0.0],];
         let result = run_dbscan(&data.view(), 0.6, 2).unwrap();
         // All should be connected in one cluster
         assert_eq!(result.n_clusters, 1);
@@ -363,11 +370,7 @@ mod tests {
 
     #[test]
     fn test_components_shape() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [0.2, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.1], [0.2, 0.0],];
         let result = run_dbscan(&data.view(), 0.5, 2).unwrap();
         let n_core = result.core_sample_indices.len();
         assert_eq!(result.components.shape(), &[n_core, 2]);
@@ -375,11 +378,7 @@ mod tests {
 
     #[test]
     fn test_identical_points() {
-        let data = array![
-            [5.0, 5.0],
-            [5.0, 5.0],
-            [5.0, 5.0],
-        ];
+        let data = array![[5.0, 5.0], [5.0, 5.0], [5.0, 5.0],];
         let result = run_dbscan(&data.view(), 0.1, 2).unwrap();
         assert_eq!(result.n_clusters, 1);
         assert!(result.labels.iter().all(|&l| l == 0));
@@ -397,26 +396,41 @@ mod tests {
     #[test]
     fn test_invalid_eps() {
         let data = array![[1.0, 2.0]];
-        assert!(matches!(run_dbscan(&data.view(), 0.0, 2), Err(ClusterError::InvalidEps(_))));
-        assert!(matches!(run_dbscan(&data.view(), -1.0, 2), Err(ClusterError::InvalidEps(_))));
+        assert!(matches!(
+            run_dbscan(&data.view(), 0.0, 2),
+            Err(ClusterError::InvalidEps(_))
+        ));
+        assert!(matches!(
+            run_dbscan(&data.view(), -1.0, 2),
+            Err(ClusterError::InvalidEps(_))
+        ));
     }
 
     #[test]
     fn test_invalid_min_samples() {
         let data = array![[1.0, 2.0]];
-        assert!(matches!(run_dbscan(&data.view(), 1.0, 0), Err(ClusterError::InvalidMinSamples(_))));
+        assert!(matches!(
+            run_dbscan(&data.view(), 1.0, 0),
+            Err(ClusterError::InvalidMinSamples(_))
+        ));
     }
 
     #[test]
     fn test_empty_input() {
         let data = Array2::<f64>::zeros((0, 2));
-        assert!(matches!(run_dbscan(&data.view(), 1.0, 2), Err(ClusterError::EmptyInput)));
+        assert!(matches!(
+            run_dbscan(&data.view(), 1.0, 2),
+            Err(ClusterError::EmptyInput)
+        ));
     }
 
     #[test]
     fn test_nan_input() {
         let data = array![[1.0, f64::NAN], [2.0, 3.0]];
-        assert!(matches!(run_dbscan(&data.view(), 1.0, 2), Err(ClusterError::NonFinite)));
+        assert!(matches!(
+            run_dbscan(&data.view(), 1.0, 2),
+            Err(ClusterError::NonFinite)
+        ));
     }
 
     // ---- f32 tests ----

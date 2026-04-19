@@ -242,19 +242,28 @@ mod tests {
     #[test]
     fn test_validate_data_empty() {
         let data = ndarray::Array2::<f64>::zeros((0, 2));
-        assert!(matches!(validate_data(&data.view()), Err(ClusterError::EmptyInput)));
+        assert!(matches!(
+            validate_data(&data.view()),
+            Err(ClusterError::EmptyInput)
+        ));
     }
 
     #[test]
     fn test_validate_data_nan() {
         let data = array![[1.0, f64::NAN], [3.0, 4.0]];
-        assert!(matches!(validate_data(&data.view()), Err(ClusterError::NonFinite)));
+        assert!(matches!(
+            validate_data(&data.view()),
+            Err(ClusterError::NonFinite)
+        ));
     }
 
     #[test]
     fn test_validate_data_inf() {
         let data = array![[1.0, f64::INFINITY], [3.0, 4.0]];
-        assert!(matches!(validate_data(&data.view()), Err(ClusterError::NonFinite)));
+        assert!(matches!(
+            validate_data(&data.view()),
+            Err(ClusterError::NonFinite)
+        ));
     }
 
     #[test]
@@ -262,7 +271,10 @@ mod tests {
         let data = array![[1.0, 2.0, 3.0]];
         assert!(matches!(
             validate_predict_data(&data.view(), 2),
-            Err(ClusterError::DimensionMismatch { expected: 2, got: 3 })
+            Err(ClusterError::DimensionMismatch {
+                expected: 2,
+                got: 3
+            })
         ));
     }
 
@@ -272,6 +284,9 @@ mod tests {
         assert!(validate_data_generic(&data.view()).is_ok());
 
         let bad = ndarray::array![[1.0f32, f32::NAN]];
-        assert!(matches!(validate_data_generic(&bad.view()), Err(ClusterError::NonFinite)));
+        assert!(matches!(
+            validate_data_generic(&bad.view()),
+            Err(ClusterError::NonFinite)
+        ));
     }
 }

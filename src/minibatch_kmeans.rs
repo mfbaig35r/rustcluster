@@ -12,7 +12,9 @@ use rand::seq::index::sample;
 use rand::SeedableRng;
 use rayon::prelude::*;
 
-use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
+use crate::distance::{
+    CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean,
+};
 use crate::error::ClusterError;
 use crate::kmeans::kmeans_plus_plus_init;
 use crate::utils::{assign_nearest_with, validate_data_generic};
@@ -40,13 +42,31 @@ pub fn run_minibatch_kmeans_with_metric(
 ) -> Result<MiniBatchKMeansState<f64>, ClusterError> {
     match metric {
         Metric::Euclidean => run_minibatch_generic::<f64, SquaredEuclidean>(
-            data, k, batch_size, max_iter, tol, seed, max_no_improvement,
+            data,
+            k,
+            batch_size,
+            max_iter,
+            tol,
+            seed,
+            max_no_improvement,
         ),
         Metric::Cosine => run_minibatch_generic::<f64, CosineDistance>(
-            data, k, batch_size, max_iter, tol, seed, max_no_improvement,
+            data,
+            k,
+            batch_size,
+            max_iter,
+            tol,
+            seed,
+            max_no_improvement,
         ),
         Metric::Manhattan => run_minibatch_generic::<f64, ManhattanDistance>(
-            data, k, batch_size, max_iter, tol, seed, max_no_improvement,
+            data,
+            k,
+            batch_size,
+            max_iter,
+            tol,
+            seed,
+            max_no_improvement,
         ),
     }
 }
@@ -64,13 +84,31 @@ pub fn run_minibatch_kmeans_with_metric_f32(
 ) -> Result<MiniBatchKMeansState<f32>, ClusterError> {
     match metric {
         Metric::Euclidean => run_minibatch_generic::<f32, SquaredEuclidean>(
-            data, k, batch_size, max_iter, tol, seed, max_no_improvement,
+            data,
+            k,
+            batch_size,
+            max_iter,
+            tol,
+            seed,
+            max_no_improvement,
         ),
         Metric::Cosine => run_minibatch_generic::<f32, CosineDistance>(
-            data, k, batch_size, max_iter, tol, seed, max_no_improvement,
+            data,
+            k,
+            batch_size,
+            max_iter,
+            tol,
+            seed,
+            max_no_improvement,
         ),
         Metric::Manhattan => run_minibatch_generic::<f32, ManhattanDistance>(
-            data, k, batch_size, max_iter, tol, seed, max_no_improvement,
+            data,
+            k,
+            batch_size,
+            max_iter,
+            tol,
+            seed,
+            max_no_improvement,
         ),
     }
 }
@@ -136,11 +174,16 @@ fn run_minibatch_generic<F: Scalar, D: Distance<F>>(
             .collect();
 
         // Compute batch inertia for early stopping
-        let batch_inertia: f64 = assignments.iter().map(|&(_, _, dist)| dist.to_f64_lossy()).sum();
+        let batch_inertia: f64 = assignments
+            .iter()
+            .map(|&(_, _, dist)| dist.to_f64_lossy())
+            .sum();
         let batch_inertia_mean = batch_inertia / effective_batch as f64;
 
         // Streaming centroid update
-        let centroid_slice = centroids.as_slice_mut().expect("centroids are C-contiguous");
+        let centroid_slice = centroids
+            .as_slice_mut()
+            .expect("centroids are C-contiguous");
         for &(point_idx, cluster, _) in &assignments {
             centroid_counts[cluster] += 1;
             let lr = 1.0 / centroid_counts[cluster] as f64;
@@ -224,26 +267,54 @@ mod tests {
     fn test_minibatch_converges_on_separated_clusters() {
         let data = well_separated_data();
         let result = run_minibatch_kmeans_with_metric(
-            &data.view(), 2, 4, 100, 0.0, 42, 10, Metric::Euclidean,
-        ).unwrap();
+            &data.view(),
+            2,
+            4,
+            100,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
+        )
+        .unwrap();
 
         assert_eq!(result.labels.len(), 8);
         let label_a = result.labels[0];
         let label_b = result.labels[4];
         assert_ne!(label_a, label_b);
-        for i in 0..4 { assert_eq!(result.labels[i], label_a); }
-        for i in 4..8 { assert_eq!(result.labels[i], label_b); }
+        for i in 0..4 {
+            assert_eq!(result.labels[i], label_a);
+        }
+        for i in 4..8 {
+            assert_eq!(result.labels[i], label_b);
+        }
     }
 
     #[test]
     fn test_minibatch_reproducibility() {
         let data = well_separated_data();
         let r1 = run_minibatch_kmeans_with_metric(
-            &data.view(), 2, 4, 50, 0.0, 42, 10, Metric::Euclidean,
-        ).unwrap();
+            &data.view(),
+            2,
+            4,
+            50,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
+        )
+        .unwrap();
         let r2 = run_minibatch_kmeans_with_metric(
-            &data.view(), 2, 4, 50, 0.0, 42, 10, Metric::Euclidean,
-        ).unwrap();
+            &data.view(),
+            2,
+            4,
+            50,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert_eq!(r1.labels, r2.labels);
         assert!((r1.inertia - r2.inertia).abs() < 1e-10);
     }
@@ -252,8 +323,16 @@ mod tests {
     fn test_minibatch_single_cluster() {
         let data = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]];
         let result = run_minibatch_kmeans_with_metric(
-            &data.view(), 1, 3, 50, 0.0, 42, 10, Metric::Euclidean,
-        ).unwrap();
+            &data.view(),
+            1,
+            3,
+            50,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert!(result.labels.iter().all(|&l| l == 0));
     }
 
@@ -262,8 +341,16 @@ mod tests {
         let data = well_separated_data();
         // batch_size=100 > n=8, should clamp and work
         let result = run_minibatch_kmeans_with_metric(
-            &data.view(), 2, 100, 50, 0.0, 42, 10, Metric::Euclidean,
-        ).unwrap();
+            &data.view(),
+            2,
+            100,
+            50,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert_eq!(result.labels.len(), 8);
     }
 
@@ -271,7 +358,14 @@ mod tests {
     fn test_minibatch_k_greater_than_n_fails() {
         let data = array![[1.0, 2.0], [3.0, 4.0]];
         let result = run_minibatch_kmeans_with_metric(
-            &data.view(), 5, 2, 50, 0.0, 42, 10, Metric::Euclidean,
+            &data.view(),
+            5,
+            2,
+            50,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
         );
         assert!(matches!(result, Err(ClusterError::InvalidClusters { .. })));
     }
@@ -280,7 +374,14 @@ mod tests {
     fn test_minibatch_empty_input_fails() {
         let data = Array2::<f64>::zeros((0, 2));
         let result = run_minibatch_kmeans_with_metric(
-            &data.view(), 1, 1, 50, 0.0, 42, 10, Metric::Euclidean,
+            &data.view(),
+            1,
+            1,
+            50,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
         );
         assert!(matches!(result, Err(ClusterError::EmptyInput)));
     }
@@ -289,7 +390,14 @@ mod tests {
     fn test_minibatch_invalid_batch_size() {
         let data = well_separated_data();
         let result = run_minibatch_kmeans_with_metric(
-            &data.view(), 2, 0, 50, 0.0, 42, 10, Metric::Euclidean,
+            &data.view(),
+            2,
+            0,
+            50,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
         );
         assert!(matches!(result, Err(ClusterError::InvalidBatchSize(_))));
     }
@@ -297,24 +405,33 @@ mod tests {
     #[test]
     fn test_minibatch_cosine() {
         let data = array![
-            [1.0, 0.0], [0.9, 0.1], [0.8, 0.2],
-            [0.0, 1.0], [0.1, 0.9], [0.2, 0.8],
+            [1.0, 0.0],
+            [0.9, 0.1],
+            [0.8, 0.2],
+            [0.0, 1.0],
+            [0.1, 0.9],
+            [0.2, 0.8],
         ];
-        let result = run_minibatch_kmeans_with_metric(
-            &data.view(), 2, 4, 50, 0.0, 42, 10, Metric::Cosine,
-        ).unwrap();
+        let result =
+            run_minibatch_kmeans_with_metric(&data.view(), 2, 4, 50, 0.0, 42, 10, Metric::Cosine)
+                .unwrap();
         assert_eq!(result.labels.len(), 6);
     }
 
     #[test]
     fn test_minibatch_f32() {
-        let data = array![
-            [0.0f32, 0.0], [0.1, 0.1],
-            [100.0, 100.0], [100.1, 100.1],
-        ];
+        let data = array![[0.0f32, 0.0], [0.1, 0.1], [100.0, 100.0], [100.1, 100.1],];
         let result = run_minibatch_kmeans_with_metric_f32(
-            &data.view(), 2, 4, 50, 0.0, 42, 10, Metric::Euclidean,
-        ).unwrap();
+            &data.view(),
+            2,
+            4,
+            50,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert_eq!(result.labels.len(), 4);
         assert_ne!(result.labels[0], result.labels[2]);
     }
@@ -324,8 +441,16 @@ mod tests {
         let data = well_separated_data();
         // With tol > 0, should stop before max_iter
         let result = run_minibatch_kmeans_with_metric(
-            &data.view(), 2, 8, 1000, 1e-4, 42, 3, Metric::Euclidean,
-        ).unwrap();
+            &data.view(),
+            2,
+            8,
+            1000,
+            1e-4,
+            42,
+            3,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert!(result.n_iter < 1000);
     }
 
@@ -333,8 +458,16 @@ mod tests {
     fn test_minibatch_identical_points() {
         let data = array![[5.0, 5.0], [5.0, 5.0], [5.0, 5.0], [5.0, 5.0]];
         let result = run_minibatch_kmeans_with_metric(
-            &data.view(), 1, 4, 50, 0.0, 42, 10, Metric::Euclidean,
-        ).unwrap();
+            &data.view(),
+            1,
+            4,
+            50,
+            0.0,
+            42,
+            10,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert!(result.inertia < 1e-10);
     }
 }

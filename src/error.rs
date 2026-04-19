@@ -71,9 +71,7 @@ pub enum ClusterError {
 impl From<ClusterError> for pyo3::PyErr {
     fn from(err: ClusterError) -> pyo3::PyErr {
         match &err {
-            ClusterError::NotFitted => {
-                pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
-            }
+            ClusterError::NotFitted => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
             _ => pyo3::exceptions::PyValueError::new_err(err.to_string()),
         }
     }

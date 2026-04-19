@@ -26,9 +26,9 @@ struct KdNode {
 /// A KD-tree for fast spatial queries on n points of dimension d.
 pub struct KdTree {
     nodes: Vec<KdNode>,
-    points: Vec<f64>,        // reordered, contiguous f64
+    points: Vec<f64>, // reordered, contiguous f64
     orig_indices: Vec<usize>,
-    bbox_min: Vec<f64>,      // flat: node_idx * d + dim
+    bbox_min: Vec<f64>, // flat: node_idx * d + dim
     bbox_max: Vec<f64>,
     n: usize,
     d: usize,
@@ -95,8 +95,12 @@ impl KdTree {
         let mut bbox_max_vec = Vec::new();
 
         Self::build_recursive(
-            &data_f64, &mut indices, d,
-            &mut nodes, &mut bbox_min_vec, &mut bbox_max_vec,
+            &data_f64,
+            &mut indices,
+            d,
+            &mut nodes,
+            &mut bbox_min_vec,
+            &mut bbox_max_vec,
         );
 
         // Reorder points to match final index order
@@ -137,15 +141,22 @@ impl KdTree {
         for &idx in indices.iter() {
             for dim in 0..d {
                 let val = data[idx * d + dim];
-                if val < lo[dim] { lo[dim] = val; }
-                if val > hi[dim] { hi[dim] = val; }
+                if val < lo[dim] {
+                    lo[dim] = val;
+                }
+                if val > hi[dim] {
+                    hi[dim] = val;
+                }
             }
         }
 
         // Push placeholder node
         nodes.push(KdNode {
-            split_dim: 0, split_val: 0.0,
-            left_or_start: 0, right_or_end: 0, is_leaf: false,
+            split_dim: 0,
+            split_val: 0.0,
+            left_or_start: 0,
+            right_or_end: 0,
+            is_leaf: false,
         });
         bbox_min.extend_from_slice(&lo);
         bbox_max.extend_from_slice(&hi);
@@ -255,8 +266,14 @@ impl KdTree {
         let mut bbox_max_vec = Vec::new();
 
         Self::build_recursive_v2(
-            &data_f64, &mut indices, 0, n, d,
-            &mut nodes, &mut bbox_min_vec, &mut bbox_max_vec,
+            &data_f64,
+            &mut indices,
+            0,
+            n,
+            d,
+            &mut nodes,
+            &mut bbox_min_vec,
+            &mut bbox_max_vec,
         );
 
         // Reorder points buffer
@@ -268,14 +285,22 @@ impl KdTree {
                 .copy_from_slice(&data_f64[orig_i * d..(orig_i + 1) * d]);
         }
 
-        Some(KdTree { nodes, points, orig_indices, bbox_min: bbox_min_vec, bbox_max: bbox_max_vec, n, d })
+        Some(KdTree {
+            nodes,
+            points,
+            orig_indices,
+            bbox_min: bbox_min_vec,
+            bbox_max: bbox_max_vec,
+            n,
+            d,
+        })
     }
 
     fn build_recursive_v2(
         data: &[f64],
         indices: &mut Vec<usize>,
-        start: usize,      // absolute position in indices
-        count: usize,       // number of points in this subtree
+        start: usize, // absolute position in indices
+        count: usize, // number of points in this subtree
         d: usize,
         nodes: &mut Vec<KdNode>,
         bbox_min: &mut Vec<f64>,
@@ -290,21 +315,29 @@ impl KdTree {
             let idx = indices[i];
             for dim in 0..d {
                 let val = data[idx * d + dim];
-                if val < lo[dim] { lo[dim] = val; }
-                if val > hi[dim] { hi[dim] = val; }
+                if val < lo[dim] {
+                    lo[dim] = val;
+                }
+                if val > hi[dim] {
+                    hi[dim] = val;
+                }
             }
         }
 
         nodes.push(KdNode {
-            split_dim: 0, split_val: 0.0,
-            left_or_start: 0, right_or_end: 0, is_leaf: false,
+            split_dim: 0,
+            split_val: 0.0,
+            left_or_start: 0,
+            right_or_end: 0,
+            is_leaf: false,
         });
         bbox_min.extend_from_slice(&lo);
         bbox_max.extend_from_slice(&hi);
 
         if count <= DEFAULT_LEAF_SIZE {
             nodes[node_idx] = KdNode {
-                split_dim: 0, split_val: 0.0,
+                split_dim: 0,
+                split_val: 0.0,
                 left_or_start: start,
                 right_or_end: start + count,
                 is_leaf: true,
@@ -333,11 +366,22 @@ impl KdTree {
         });
         let split_val = data[indices[start + median] * d + best_dim];
 
-        let left_child = Self::build_recursive_v2(data, indices, start, median, d, nodes, bbox_min, bbox_max);
-        let right_child = Self::build_recursive_v2(data, indices, start + median, count - median, d, nodes, bbox_min, bbox_max);
+        let left_child =
+            Self::build_recursive_v2(data, indices, start, median, d, nodes, bbox_min, bbox_max);
+        let right_child = Self::build_recursive_v2(
+            data,
+            indices,
+            start + median,
+            count - median,
+            d,
+            nodes,
+            bbox_min,
+            bbox_max,
+        );
 
         nodes[node_idx] = KdNode {
-            split_dim: best_dim, split_val,
+            split_dim: best_dim,
+            split_val,
             left_or_start: left_child,
             right_or_end: right_child,
             is_leaf: false,
@@ -465,10 +509,16 @@ impl KdTree {
                 let point = &self.points[i * d..(i + 1) * d];
                 let dist = point_dist::<B>(query, point);
                 if heap.len() < k {
-                    heap.push(Neighbor { dist, index: orig_idx });
+                    heap.push(Neighbor {
+                        dist,
+                        index: orig_idx,
+                    });
                 } else if dist < heap.peek().unwrap().dist {
                     heap.pop();
-                    heap.push(Neighbor { dist, index: orig_idx });
+                    heap.push(Neighbor {
+                        dist,
+                        index: orig_idx,
+                    });
                 }
             }
             return;
@@ -543,7 +593,13 @@ mod tests {
 
     // ---- Range Query ----
 
-    fn brute_force_radius_sqeuc(data: &[f64], n: usize, d: usize, query: &[f64], radius: f64) -> Vec<usize> {
+    fn brute_force_radius_sqeuc(
+        data: &[f64],
+        n: usize,
+        d: usize,
+        query: &[f64],
+        radius: f64,
+    ) -> Vec<usize> {
         let mut results = Vec::new();
         for i in 0..n {
             let point = &data[i * d..(i + 1) * d];
@@ -556,7 +612,13 @@ mod tests {
         results
     }
 
-    fn brute_force_radius_manhattan(data: &[f64], n: usize, d: usize, query: &[f64], radius: f64) -> Vec<usize> {
+    fn brute_force_radius_manhattan(
+        data: &[f64],
+        n: usize,
+        d: usize,
+        query: &[f64],
+        radius: f64,
+    ) -> Vec<usize> {
         let mut results = Vec::new();
         for i in 0..n {
             let point = &data[i * d..(i + 1) * d];
@@ -659,7 +721,14 @@ mod tests {
 
     // ---- k-NN Query ----
 
-    fn brute_force_knn_sqeuc(data: &[f64], n: usize, d: usize, query: &[f64], k: usize, exclude: Option<usize>) -> Vec<(usize, f64)> {
+    fn brute_force_knn_sqeuc(
+        data: &[f64],
+        n: usize,
+        d: usize,
+        query: &[f64],
+        k: usize,
+        exclude: Option<usize>,
+    ) -> Vec<(usize, f64)> {
         let mut dists: Vec<(usize, f64)> = (0..n)
             .filter(|&i| exclude != Some(i))
             .map(|i| {
@@ -692,7 +761,12 @@ mod tests {
 
             assert_eq!(tree_result.len(), expected.len(), "Length mismatch at {qi}");
             for (t, e) in tree_result.iter().zip(expected.iter()) {
-                assert!((t.1 - e.1).abs() < 1e-10, "Distance mismatch at point {qi}: tree={}, brute={}", t.1, e.1);
+                assert!(
+                    (t.1 - e.1).abs() < 1e-10,
+                    "Distance mismatch at point {qi}: tree={}, brute={}",
+                    t.1,
+                    e.1
+                );
             }
         }
     }

@@ -2,25 +2,31 @@
 use num_traits::Float;
 
 /// Marker trait for supported floating-point types (f32, f64).
-pub trait Scalar:
-    Float + Send + Sync + std::iter::Sum + std::fmt::Debug + 'static
-{
+pub trait Scalar: Float + Send + Sync + std::iter::Sum + std::fmt::Debug + 'static {
     fn to_f64_lossy(self) -> f64;
     fn from_f64_lossy(v: f64) -> Self;
 }
 
 impl Scalar for f64 {
     #[inline(always)]
-    fn to_f64_lossy(self) -> f64 { self }
+    fn to_f64_lossy(self) -> f64 {
+        self
+    }
     #[inline(always)]
-    fn from_f64_lossy(v: f64) -> Self { v }
+    fn from_f64_lossy(v: f64) -> Self {
+        v
+    }
 }
 
 impl Scalar for f32 {
     #[inline(always)]
-    fn to_f64_lossy(self) -> f64 { self as f64 }
+    fn to_f64_lossy(self) -> f64 {
+        self as f64
+    }
     #[inline(always)]
-    fn from_f64_lossy(v: f64) -> Self { v as f32 }
+    fn from_f64_lossy(v: f64) -> Self {
+        v as f32
+    }
 }
 
 /// Trait for computing distance between two equal-length slices.

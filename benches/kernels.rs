@@ -58,9 +58,7 @@ fn bench_assign_nearest(c: &mut Criterion) {
             BenchmarkId::new("single", format!("d{}_k{}", d, k)),
             &(d, k),
             |bench, _| {
-                bench.iter(|| {
-                    assign_nearest(black_box(&point), black_box(&centroids), k, d)
-                });
+                bench.iter(|| assign_nearest(black_box(&point), black_box(&centroids), k, d));
             },
         );
     }
@@ -160,16 +158,8 @@ fn bench_full_fit(c: &mut Criterion) {
                 |bench, _| {
                     bench.iter(|| {
                         black_box(
-                            run_kmeans_n_init(
-                                &data.view(),
-                                k,
-                                20,
-                                1e-4,
-                                42,
-                                1,
-                                Algorithm::Hamerly,
-                            )
-                            .unwrap(),
+                            run_kmeans_n_init(&data.view(), k, 20, 1e-4, 42, 1, Algorithm::Hamerly)
+                                .unwrap(),
                         );
                     });
                 },

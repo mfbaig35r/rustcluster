@@ -41,7 +41,8 @@ pub fn silhouette_score<F: Scalar>(
         return Err(ClusterError::EmptyInput);
     }
 
-    let unique_labels: std::collections::HashSet<i64> = valid_indices.iter().map(|&i| labels[i]).collect();
+    let unique_labels: std::collections::HashSet<i64> =
+        valid_indices.iter().map(|&i| labels[i]).collect();
     let n_clusters = unique_labels.len();
     if n_clusters < 2 {
         return Ok(0.0); // silhouette is undefined for 1 cluster, return 0
@@ -64,7 +65,9 @@ pub fn silhouette_score<F: Scalar>(
                     continue;
                 }
                 let other = &data_slice[j * d..(j + 1) * d];
-                let dist = squared_euclidean_generic(point, other).to_f64_lossy().sqrt();
+                let dist = squared_euclidean_generic(point, other)
+                    .to_f64_lossy()
+                    .sqrt();
                 let entry = cluster_sums.entry(labels[j]).or_insert((0.0, 0));
                 entry.0 += dist;
                 entry.1 += 1;
@@ -80,7 +83,13 @@ pub fn silhouette_score<F: Scalar>(
             let b = cluster_sums
                 .iter()
                 .filter(|(&label, _)| label != my_label)
-                .map(|(_, &(sum, count))| if count > 0 { sum / count as f64 } else { f64::MAX })
+                .map(|(_, &(sum, count))| {
+                    if count > 0 {
+                        sum / count as f64
+                    } else {
+                        f64::MAX
+                    }
+                })
                 .fold(f64::MAX, f64::min);
 
             if a.max(b) == 0.0 {
@@ -133,7 +142,8 @@ pub fn calinski_harabasz_score<F: Scalar>(
     }
 
     // Compute per-cluster centroids and counts
-    let unique_labels: std::collections::BTreeSet<i64> = valid_indices.iter().map(|&i| labels[i]).collect();
+    let unique_labels: std::collections::BTreeSet<i64> =
+        valid_indices.iter().map(|&i| labels[i]).collect();
     let n_clusters = unique_labels.len();
     if n_clusters < 2 {
         return Ok(0.0);
@@ -221,7 +231,8 @@ pub fn davies_bouldin_score<F: Scalar>(
 
     // Compute per-cluster centroids
     let unique_labels: Vec<i64> = {
-        let set: std::collections::BTreeSet<i64> = valid_indices.iter().map(|&i| labels[i]).collect();
+        let set: std::collections::BTreeSet<i64> =
+            valid_indices.iter().map(|&i| labels[i]).collect();
         set.into_iter().collect()
     };
     let n_clusters = unique_labels.len();
@@ -404,12 +415,7 @@ mod tests {
 
     #[test]
     fn test_f32_silhouette() {
-        let data = array![
-            [0.0f32, 0.0],
-            [0.1, 0.0],
-            [10.0, 10.0],
-            [10.1, 10.0],
-        ];
+        let data = array![[0.0f32, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0],];
         let labels = vec![0, 0, 1, 1];
         let score = silhouette_score(&data.view(), &labels).unwrap();
         assert!(score > 0.9);
