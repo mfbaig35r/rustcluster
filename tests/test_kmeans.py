@@ -206,8 +206,9 @@ class TestInputNormalization:
     def test_float32_works(self, simple_data):
         X = simple_data.astype(np.float32)
         model = KMeans(n_clusters=2, random_state=42)
-        model.fit(X)  # Wrapper converts to float64
+        model.fit(X)  # Native f32 path
         assert len(model.labels_) == len(X)
+        assert model.cluster_centers_.dtype == np.float32
 
     def test_integer_input_works(self):
         X = np.array([[1, 2], [3, 4], [10, 20], [12, 22]])
@@ -351,3 +352,51 @@ class TestAlgorithm:
     def test_algorithm_in_repr(self):
         model = KMeans(n_clusters=2, algorithm="hamerly")
         assert 'algorithm="hamerly"' in repr(model)
+
+
+# ---------------------------------------------------------------------------
+# f32 support
+# ---------------------------------------------------------------------------
+
+class TestFloat32:
+    def test_f32_fit_predict(self, blob_data):
+        X = blob_data.astype(np.float32)
+        model = KMeans(n_clusters=2, random_state=42)
+        labels = model.fit_predict(X)
+        assert len(labels) == len(X)
+
+    def test_f32_cluster_centers_dtype(self, blob_data):
+        X = blob_data.astype(np.float32)
+        model = KMeans(n_clusters=2, random_state=42)
+        model.fit(X)
+        assert model.cluster_centers_.dtype == np.float32
+
+    def test_f32_matches_f64_partition(self, blob_data):
+        """f32 and f64 produce same cluster assignments on well-separated data."""
+        m64 = KMeans(n_clusters=2, random_state=42, n_init=1)
+        m64.fit(blob_data)
+
+        m32 = KMeans(n_clusters=2, random_state=42, n_init=1)
+        m32.fit(blob_data.astype(np.float32))
+
+        np.testing.assert_array_equal(m64.labels_, m32.labels_)
+
+    def test_f32_inertia_type(self, blob_data):
+        X = blob_data.astype(np.float32)
+        model = KMeans(n_clusters=2, random_state=42)
+        model.fit(X)
+        assert isinstance(model.inertia_, float)
+
+    def test_f32_predict(self, blob_data):
+        X = blob_data.astype(np.float32)
+        model = KMeans(n_clusters=2, random_state=42)
+        model.fit(X)
+        preds = model.predict(X)
+        np.testing.assert_array_equal(preds, model.labels_)
+
+    def test_f32_hamerly(self, blob_data):
+        X = blob_data.astype(np.float32)
+        model = KMeans(n_clusters=2, random_state=42, algorithm="hamerly")
+        model.fit(X)
+        assert len(model.labels_) == len(X)
+        assert model.cluster_centers_.dtype == np.float32

@@ -4,10 +4,10 @@ mod hamerly;
 pub mod kmeans;
 pub mod utils;
 
-/// Re-exports for Criterion benchmarks (benches live outside the crate).
+/// Re-exports for Criterion benchmarks.
 #[doc(hidden)]
 pub mod _bench_api {
-    pub use crate::distance::{Distance, SquaredEuclidean};
+    pub use crate::distance::{Distance, Scalar, SquaredEuclidean};
     pub use crate::kmeans::{kmeans_plus_plus_init, run_kmeans_n_init, Algorithm};
     pub use crate::utils::{assign_nearest, assign_nearest_two, squared_euclidean};
 }
@@ -19,8 +19,14 @@ mod python_bindings {
     use rayon::prelude::*;
 
     use crate::error::KMeansError;
-    use crate::kmeans::{run_kmeans_n_init, Algorithm, KMeansState};
-    use crate::utils::validate_predict_data;
+    use crate::kmeans::{run_kmeans_n_init, run_kmeans_n_init_f32, Algorithm, KMeansState};
+    use crate::utils::{validate_predict_data, validate_predict_data_generic};
+
+    /// Fitted state holding either f64 or f32 results.
+    enum FittedState {
+        F64(KMeansState<f64>),
+        F32(KMeansState<f32>),
+    }
 
     #[pyclass]
     struct KMeans {
@@ -30,7 +36,7 @@ mod python_bindings {
         random_state: u64,
         n_init: usize,
         algorithm: Algorithm,
-        fitted: Option<KMeansState>,
+        fitted: Option<FittedState>,
     }
 
     #[pymethods]
@@ -71,12 +77,11 @@ mod python_bindings {
             })
         }
 
-        /// Fit the K-means model to the input data.
-        fn fit(&mut self, py: Python<'_>, x: PyReadonlyArray2<'_, f64>) -> PyResult<()> {
+        /// Fit the K-means model (f64 input).
+        fn fit_f64(&mut self, py: Python<'_>, x: PyReadonlyArray2<'_, f64>) -> PyResult<()> {
             if !x.is_c_contiguous() {
                 return Err(KMeansError::NotContiguous.into());
             }
-
             let view = x.as_array();
             let k = self.n_clusters;
             let max_iter = self.max_iter;
@@ -88,88 +93,164 @@ mod python_bindings {
             let state = py.allow_threads(move || {
                 run_kmeans_n_init(&view, k, max_iter, tol, seed, n_init, algo)
             })?;
-
-            self.fitted = Some(state);
+            self.fitted = Some(FittedState::F64(state));
             Ok(())
+        }
+
+        /// Fit the K-means model (f32 input).
+        fn fit_f32(&mut self, py: Python<'_>, x: PyReadonlyArray2<'_, f32>) -> PyResult<()> {
+            if !x.is_c_contiguous() {
+                return Err(KMeansError::NotContiguous.into());
+            }
+            let view = x.as_array();
+            let k = self.n_clusters;
+            let max_iter = self.max_iter;
+            let tol = self.tol;
+            let seed = self.random_state;
+            let n_init = self.n_init;
+            let algo = self.algorithm;
+
+            let state = py.allow_threads(move || {
+                run_kmeans_n_init_f32(&view, k, max_iter, tol, seed, n_init, algo)
+            })?;
+            self.fitted = Some(FittedState::F32(state));
+            Ok(())
+        }
+
+        /// Fit — dispatches to f64 or f32 based on input dtype.
+        fn fit(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
+            // Try f64 first (most common)
+            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
+                return self.fit_f64(py, arr);
+            }
+            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+                return self.fit_f32(py, arr);
+            }
+            Err(pyo3::exceptions::PyValueError::new_err(
+                "Expected a C-contiguous float32 or float64 NumPy array",
+            ))
         }
 
         /// Predict cluster labels for new data.
         fn predict<'py>(
             &self,
             py: Python<'py>,
-            x: PyReadonlyArray2<'_, f64>,
+            x: &Bound<'_, pyo3::types::PyAny>,
         ) -> PyResult<Bound<'py, PyArray1<i64>>> {
-            let state = self.fitted.as_ref().ok_or(KMeansError::NotFitted)?;
+            match self.fitted.as_ref().ok_or(KMeansError::NotFitted)? {
+                FittedState::F64(state) => {
+                    let arr = x.extract::<PyReadonlyArray2<'_, f64>>()
+                        .map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                            "Model was fit with float64 — predict input must also be float64"
+                        ))?;
+                    if !arr.is_c_contiguous() {
+                        return Err(KMeansError::NotContiguous.into());
+                    }
+                    let view = arr.as_array();
+                    let (_, expected_d) = state.centroids.dim();
+                    validate_predict_data(&view, expected_d)?;
 
-            if !x.is_c_contiguous() {
-                return Err(KMeansError::NotContiguous.into());
+                    let centroids = state.centroids.clone();
+                    let k = self.n_clusters;
+
+                    let labels = py.allow_threads(move || {
+                        let (n, d) = view.dim();
+                        let data_slice = view.as_slice().expect("data is C-contiguous");
+                        let centroids_slice = centroids.as_slice().expect("centroids are C-contiguous");
+                        (0..n)
+                            .into_par_iter()
+                            .map(|i| {
+                                let point = &data_slice[i * d..(i + 1) * d];
+                                let (idx, _) = crate::utils::assign_nearest(point, centroids_slice, k, d);
+                                idx as i64
+                            })
+                            .collect::<Vec<i64>>()
+                    });
+                    Ok(PyArray1::from_vec(py, labels))
+                }
+                FittedState::F32(state) => {
+                    let arr = x.extract::<PyReadonlyArray2<'_, f32>>()
+                        .map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                            "Model was fit with float32 — predict input must also be float32"
+                        ))?;
+                    if !arr.is_c_contiguous() {
+                        return Err(KMeansError::NotContiguous.into());
+                    }
+                    let view = arr.as_array();
+                    let (_, expected_d) = state.centroids.dim();
+                    validate_predict_data_generic(&view, expected_d)?;
+
+                    let centroids = state.centroids.clone();
+                    let k = self.n_clusters;
+
+                    let labels = py.allow_threads(move || {
+                        use crate::distance::SquaredEuclidean;
+                        let (n, d) = view.dim();
+                        let data_slice = view.as_slice().expect("data is C-contiguous");
+                        let centroids_slice = centroids.as_slice().expect("centroids are C-contiguous");
+                        (0..n)
+                            .into_par_iter()
+                            .map(|i| {
+                                let point = &data_slice[i * d..(i + 1) * d];
+                                let (idx, _) = crate::utils::assign_nearest_with::<f32, SquaredEuclidean>(point, centroids_slice, k, d);
+                                idx as i64
+                            })
+                            .collect::<Vec<i64>>()
+                    });
+                    Ok(PyArray1::from_vec(py, labels))
+                }
             }
-
-            let view = x.as_array();
-            let (_, expected_d) = state.centroids.dim();
-            validate_predict_data(&view, expected_d)?;
-
-            let centroids = state.centroids.clone();
-            let k = self.n_clusters;
-
-            let labels = py.allow_threads(move || {
-                let (n, d) = view.dim();
-                let data_slice = view.as_slice().expect("data is C-contiguous");
-                let centroids_slice = centroids.as_slice().expect("centroids are C-contiguous");
-
-                let labels: Vec<i64> = (0..n)
-                    .into_par_iter()
-                    .map(|i| {
-                        let point = &data_slice[i * d..(i + 1) * d];
-                        let (idx, _) = crate::utils::assign_nearest(point, centroids_slice, k, d);
-                        idx as i64
-                    })
-                    .collect();
-                labels
-            });
-
-            Ok(PyArray1::from_vec(py, labels))
         }
 
         /// Fit the model and return cluster labels.
         fn fit_predict<'py>(
             &mut self,
             py: Python<'py>,
-            x: PyReadonlyArray2<'_, f64>,
+            x: &Bound<'_, pyo3::types::PyAny>,
         ) -> PyResult<Bound<'py, PyArray1<i64>>> {
             self.fit(py, x)?;
-            let state = self.fitted.as_ref().unwrap();
-            let labels: Vec<i64> = state.labels.iter().map(|&l| l as i64).collect();
+            let labels = match self.fitted.as_ref().unwrap() {
+                FittedState::F64(s) => s.labels.iter().map(|&l| l as i64).collect::<Vec<_>>(),
+                FittedState::F32(s) => s.labels.iter().map(|&l| l as i64).collect::<Vec<_>>(),
+            };
             Ok(PyArray1::from_vec(py, labels))
         }
 
-        /// Cluster labels for the training data (available after fit).
         #[getter]
         fn labels_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
-            let state = self.fitted.as_ref().ok_or(KMeansError::NotFitted)?;
-            let labels: Vec<i64> = state.labels.iter().map(|&l| l as i64).collect();
+            let labels = match self.fitted.as_ref().ok_or(KMeansError::NotFitted)? {
+                FittedState::F64(s) => s.labels.iter().map(|&l| l as i64).collect::<Vec<_>>(),
+                FittedState::F32(s) => s.labels.iter().map(|&l| l as i64).collect::<Vec<_>>(),
+            };
             Ok(PyArray1::from_vec(py, labels))
         }
 
-        /// Centroid coordinates (k x d), available after fit.
         #[getter]
-        fn cluster_centers_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-            let state = self.fitted.as_ref().ok_or(KMeansError::NotFitted)?;
-            Ok(PyArray2::from_owned_array(py, state.centroids.clone()))
+        fn cluster_centers_<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+            match self.fitted.as_ref().ok_or(KMeansError::NotFitted)? {
+                FittedState::F64(s) => {
+                    Ok(PyArray2::from_owned_array(py, s.centroids.clone()).into_any().unbind())
+                }
+                FittedState::F32(s) => {
+                    Ok(PyArray2::from_owned_array(py, s.centroids.clone()).into_any().unbind())
+                }
+            }
         }
 
-        /// Sum of squared distances to nearest centroid (available after fit).
         #[getter]
         fn inertia_(&self) -> PyResult<f64> {
-            let state = self.fitted.as_ref().ok_or(KMeansError::NotFitted)?;
-            Ok(state.inertia)
+            match self.fitted.as_ref().ok_or(KMeansError::NotFitted)? {
+                FittedState::F64(s) => Ok(s.inertia),
+                FittedState::F32(s) => Ok(s.inertia),
+            }
         }
 
-        /// Number of iterations in the best run (available after fit).
         #[getter]
         fn n_iter_(&self) -> PyResult<usize> {
-            let state = self.fitted.as_ref().ok_or(KMeansError::NotFitted)?;
-            Ok(state.n_iter)
+            match self.fitted.as_ref().ok_or(KMeansError::NotFitted)? {
+                FittedState::F64(s) => Ok(s.n_iter),
+                FittedState::F32(s) => Ok(s.n_iter),
+            }
         }
 
         fn __repr__(&self) -> String {

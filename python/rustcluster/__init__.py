@@ -44,10 +44,12 @@ class KMeans:
         self._algorithm = algorithm
 
     def _prepare(self, X):
-        """Ensure input is C-contiguous float64."""
+        """Ensure input is C-contiguous float32 or float64."""
         X = np.asarray(X)
         if X.ndim != 2:
             raise ValueError(f"Expected 2D array, got {X.ndim}D")
+        if X.dtype == np.float32:
+            return np.ascontiguousarray(X, dtype=np.float32)
         return np.ascontiguousarray(X, dtype=np.float64)
 
     def fit(self, X):

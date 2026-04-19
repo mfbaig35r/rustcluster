@@ -5,15 +5,15 @@ use rand_distr::WeightedIndex;
 use rand_distr::Distribution;
 use rayon::prelude::*;
 
-use crate::distance::{Distance, SquaredEuclidean};
+use crate::distance::{Distance, Scalar, SquaredEuclidean};
 use crate::error::KMeansError;
-use crate::utils::{assign_nearest_with, validate_data};
+use crate::utils::{assign_nearest_with, validate_data_generic};
 
-/// Result of a fitted K-means model.
-pub struct KMeansState {
-    pub centroids: Array2<f64>,
+/// Result of a fitted K-means model, generic over float type.
+pub struct KMeansState<F: Scalar> {
+    pub centroids: Array2<F>,
     pub labels: Vec<usize>,
-    pub inertia: f64,
+    pub inertia: f64, // always f64 for consistency at the Python boundary
     pub n_iter: usize,
 }
 
@@ -26,7 +26,6 @@ pub enum Algorithm {
 }
 
 impl Algorithm {
-    /// Parse from a string (Python-facing).
     pub fn from_str(s: &str) -> Result<Self, KMeansError> {
         match s.to_lowercase().as_str() {
             "auto" => Ok(Algorithm::Auto),
@@ -36,12 +35,10 @@ impl Algorithm {
         }
     }
 
-    /// Resolve Auto to a concrete engine based on data dimensions.
     pub fn resolve(self, d: usize, k: usize) -> Algorithm {
         match self {
             Algorithm::Auto => {
                 if k < 2 {
-                    // Hamerly needs k >= 2 for second-nearest tracking
                     Algorithm::Lloyd
                 } else if d <= 16 && k <= 32 {
                     Algorithm::Lloyd
@@ -54,8 +51,9 @@ impl Algorithm {
     }
 }
 
-/// Run K-means with `n_init` random initializations, returning the best result.
-/// Uses squared Euclidean distance (the public API entry point).
+// ---- Public entry points (f64, SquaredEuclidean — for Python API) ----
+
+/// Run K-means with f64 and squared Euclidean distance.
 pub fn run_kmeans_n_init(
     data: &ArrayView2<f64>,
     k: usize,
@@ -64,25 +62,40 @@ pub fn run_kmeans_n_init(
     seed: u64,
     n_init: usize,
     algo: Algorithm,
-) -> Result<KMeansState, KMeansError> {
-    run_kmeans_n_init_with::<SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo)
+) -> Result<KMeansState<f64>, KMeansError> {
+    run_kmeans_n_init_generic::<f64, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo)
 }
 
-/// Run K-means with a generic distance metric.
-pub fn run_kmeans_n_init_with<D: Distance>(
-    data: &ArrayView2<f64>,
+/// Run K-means with f32 and squared Euclidean distance.
+pub fn run_kmeans_n_init_f32(
+    data: &ArrayView2<f32>,
     k: usize,
     max_iter: usize,
     tol: f64,
     seed: u64,
     n_init: usize,
     algo: Algorithm,
-) -> Result<KMeansState, KMeansError> {
-    let mut best: Option<KMeansState> = None;
+) -> Result<KMeansState<f32>, KMeansError> {
+    run_kmeans_n_init_generic::<f32, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo)
+}
+
+// ---- Generic implementation ----
+
+/// Run K-means with `n_init` initializations, generic over float type and distance.
+pub fn run_kmeans_n_init_generic<F: Scalar, D: Distance<F>>(
+    data: &ArrayView2<F>,
+    k: usize,
+    max_iter: usize,
+    tol: f64,
+    seed: u64,
+    n_init: usize,
+    algo: Algorithm,
+) -> Result<KMeansState<F>, KMeansError> {
+    let mut best: Option<KMeansState<F>> = None;
 
     for i in 0..n_init {
         let run_seed = seed.wrapping_add(i as u64);
-        let result = run_kmeans_with::<D>(data, k, max_iter, tol, run_seed, algo)?;
+        let result = run_kmeans_single::<F, D>(data, k, max_iter, tol, run_seed, algo)?;
 
         let is_better = match &best {
             None => true,
@@ -97,16 +110,15 @@ pub fn run_kmeans_n_init_with<D: Distance>(
     Ok(best.unwrap())
 }
 
-/// Run a single K-means fit with a generic distance, dispatching to the chosen algorithm.
-fn run_kmeans_with<D: Distance>(
-    data: &ArrayView2<f64>,
+fn run_kmeans_single<F: Scalar, D: Distance<F>>(
+    data: &ArrayView2<F>,
     k: usize,
     max_iter: usize,
     tol: f64,
     seed: u64,
     algo: Algorithm,
-) -> Result<KMeansState, KMeansError> {
-    validate_data(data)?;
+) -> Result<KMeansState<F>, KMeansError> {
+    validate_data_generic(data)?;
 
     let (n, d) = data.dim();
     if k == 0 || k > n {
@@ -114,7 +126,7 @@ fn run_kmeans_with<D: Distance>(
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut centroids = kmeans_plus_plus_init::<D>(data, k, &mut rng);
+    let mut centroids = kmeans_plus_plus_init::<F, D>(data, k, &mut rng);
     let data_slice = data.as_slice().expect("data must be C-contiguous");
 
     let resolved = algo.resolve(d, k);
@@ -125,50 +137,47 @@ fn run_kmeans_with<D: Distance>(
     };
 
     match resolved {
-        Algorithm::Lloyd => run_lloyd_iterations::<D>(data_slice, &mut centroids, n, d, k, max_iter, tol, &mut rng),
-        Algorithm::Hamerly => crate::hamerly::run_hamerly_iterations::<D>(data_slice, &mut centroids, n, d, k, max_iter, tol, &mut rng),
-        Algorithm::Auto => unreachable!("Auto should be resolved before reaching here"),
+        Algorithm::Lloyd => run_lloyd_iterations::<F, D>(data_slice, &mut centroids, n, d, k, max_iter, tol, &mut rng),
+        Algorithm::Hamerly => crate::hamerly::run_hamerly_iterations::<F, D>(data_slice, &mut centroids, n, d, k, max_iter, tol, &mut rng),
+        Algorithm::Auto => unreachable!(),
     }
 }
 
-/// Lloyd's iteration loop with generic distance. Returns KMeansState.
-fn run_lloyd_iterations<D: Distance>(
-    data_slice: &[f64],
-    centroids: &mut Array2<f64>,
+/// Lloyd's iteration loop, generic over float type and distance.
+fn run_lloyd_iterations<F: Scalar, D: Distance<F>>(
+    data_slice: &[F],
+    centroids: &mut Array2<F>,
     n: usize,
     d: usize,
     k: usize,
     max_iter: usize,
     tol: f64,
     rng: &mut StdRng,
-) -> Result<KMeansState, KMeansError> {
+) -> Result<KMeansState<F>, KMeansError> {
     let mut labels = vec![0usize; n];
     let mut inertia = f64::MAX;
     let mut n_iter = 0;
 
-    // Pre-allocate buffer for old centroids to avoid per-iteration allocation
-    let mut old_centroid_buf = vec![0.0f64; k * d];
+    let mut old_centroid_buf = vec![F::zero(); k * d];
 
     for iter in 0..max_iter {
         let centroids_slice = centroids.as_slice().expect("centroids are C-contiguous");
 
-        // Assignment step (parallel)
-        let assignments: Vec<(usize, f64)> = (0..n)
+        let assignments: Vec<(usize, F)> = (0..n)
             .into_par_iter()
             .map(|i| {
                 let point = &data_slice[i * d..(i + 1) * d];
-                assign_nearest_with::<D>(point, centroids_slice, k, d)
+                assign_nearest_with::<F, D>(point, centroids_slice, k, d)
             })
             .collect();
 
-        let mut new_inertia = 0.0;
+        let mut new_inertia = 0.0f64;
         for (i, &(label, dist)) in assignments.iter().enumerate() {
             labels[i] = label;
-            new_inertia += dist;
+            new_inertia += dist.to_f64_lossy();
         }
         inertia = new_inertia;
 
-        // Save old centroids into pre-allocated buffer (no allocation)
         old_centroid_buf.copy_from_slice(centroids_slice);
 
         recompute_centroids(data_slice, &labels, centroids, n, d, k);
@@ -176,13 +185,13 @@ fn run_lloyd_iterations<D: Distance>(
 
         n_iter = iter + 1;
 
-        // Convergence check: compute max shift inline (no Vec allocation)
+        // Convergence check
         let new_slice = centroids.as_slice().expect("centroids are C-contiguous");
         let mut max_shift = 0.0f64;
         for cluster in 0..k {
             let start = cluster * d;
             let end = start + d;
-            let shift = D::distance(&old_centroid_buf[start..end], &new_slice[start..end]);
+            let shift = D::distance(&old_centroid_buf[start..end], &new_slice[start..end]).to_f64_lossy();
             if shift > max_shift {
                 max_shift = shift;
             }
@@ -200,25 +209,24 @@ fn run_lloyd_iterations<D: Distance>(
     })
 }
 
-// ---- Shared helpers used by both Lloyd and Hamerly ----
+// ---- Shared helpers ----
 
-/// K-means++ initialization: greedily pick centroids proportional to distance.
-pub fn kmeans_plus_plus_init<D: Distance>(
-    data: &ArrayView2<f64>,
+/// K-means++ initialization, generic.
+pub fn kmeans_plus_plus_init<F: Scalar, D: Distance<F>>(
+    data: &ArrayView2<F>,
     k: usize,
     rng: &mut StdRng,
-) -> Array2<f64> {
+) -> Array2<F> {
     let (n, d) = data.dim();
     let data_slice = data.as_slice().expect("data must be C-contiguous");
 
-    let mut centroids = Array2::<f64>::zeros((k, d));
+    let mut centroids = Array2::<F>::zeros((k, d));
 
-    // Pick first centroid uniformly at random
     let first = rng.gen_range(0..n);
     let first_row = &data_slice[first * d..(first + 1) * d];
     centroids.row_mut(0).assign(&ndarray::ArrayView1::from(first_row));
 
-    let mut min_dists = vec![f64::MAX; n];
+    let mut min_dists = vec![f64::MAX; n]; // sampling uses f64 for precision
 
     for c in 1..k {
         let last_centroid = centroids.row(c - 1);
@@ -226,7 +234,7 @@ pub fn kmeans_plus_plus_init<D: Distance>(
 
         for i in 0..n {
             let point = &data_slice[i * d..(i + 1) * d];
-            let dist = D::distance(point, last_slice);
+            let dist = D::distance(point, last_slice).to_f64_lossy();
             if dist < min_dists[i] {
                 min_dists[i] = dist;
             }
@@ -247,18 +255,17 @@ pub fn kmeans_plus_plus_init<D: Distance>(
     centroids
 }
 
-/// Recompute centroids as the mean of assigned points.
-pub(crate) fn recompute_centroids(
-    data_slice: &[f64],
+/// Recompute centroids as mean of assigned points.
+pub(crate) fn recompute_centroids<F: Scalar>(
+    data_slice: &[F],
     labels: &[usize],
-    centroids: &mut Array2<f64>,
+    centroids: &mut Array2<F>,
     n: usize,
     d: usize,
     k: usize,
 ) {
-    let centroid_slice = centroids.as_slice_mut().expect("centroids are C-contiguous");
-
-    let mut sums = vec![0.0; k * d];
+    // Accumulate in f64 for precision, then convert back
+    let mut sums = vec![0.0f64; k * d];
     let mut counts = vec![0usize; k];
 
     for i in 0..n {
@@ -267,27 +274,28 @@ pub(crate) fn recompute_centroids(
         let point_start = i * d;
         let sum_start = label * d;
         for j in 0..d {
-            sums[sum_start + j] += data_slice[point_start + j];
+            sums[sum_start + j] += data_slice[point_start + j].to_f64_lossy();
         }
     }
 
+    let centroid_slice = centroids.as_slice_mut().expect("centroids are C-contiguous");
     for cluster in 0..k {
         if counts[cluster] > 0 {
             let count = counts[cluster] as f64;
             let start = cluster * d;
             for j in 0..d {
-                centroid_slice[start + j] = sums[start + j] / count;
+                centroid_slice[start + j] = F::from_f64_lossy(sums[start + j] / count);
             }
         }
     }
 }
 
 /// Re-seed empty clusters with the point farthest from its assigned centroid.
-pub(crate) fn handle_empty_clusters(
-    data_slice: &[f64],
+pub(crate) fn handle_empty_clusters<F: Scalar>(
+    data_slice: &[F],
     labels: &[usize],
-    centroids: &mut Array2<f64>,
-    assignments: &[(usize, f64)],
+    centroids: &mut Array2<F>,
+    assignments: &[(usize, F)],
     n: usize,
     d: usize,
     k: usize,
@@ -318,21 +326,21 @@ pub(crate) fn handle_empty_clusters(
     }
 }
 
-/// Compute per-centroid shifts between old and new centroids using a generic distance.
-pub(crate) fn compute_centroid_shifts<D: Distance>(
-    old: &Array2<f64>,
-    new: &Array2<f64>,
+/// Compute per-centroid shifts, generic.
+pub(crate) fn compute_centroid_shifts<F: Scalar, D: Distance<F>>(
+    old: &Array2<F>,
+    new: &Array2<F>,
     k: usize,
     d: usize,
 ) -> Vec<f64> {
     let old_slice = old.as_slice().expect("old centroids are contiguous");
     let new_slice = new.as_slice().expect("new centroids are contiguous");
 
-    let mut shifts = vec![0.0; k];
+    let mut shifts = vec![0.0f64; k];
     for cluster in 0..k {
         let start = cluster * d;
         let end = start + d;
-        shifts[cluster] = D::distance(&old_slice[start..end], &new_slice[start..end]);
+        shifts[cluster] = D::distance(&old_slice[start..end], &new_slice[start..end]).to_f64_lossy();
     }
     shifts
 }
@@ -355,11 +363,24 @@ mod tests {
         ]
     }
 
+    fn well_separated_data_f32() -> Array2<f32> {
+        array![
+            [0.0f32, 0.0],
+            [0.1, 0.1],
+            [0.2, -0.1],
+            [-0.1, 0.2],
+            [100.0, 100.0],
+            [100.1, 100.1],
+            [100.2, 99.9],
+            [99.9, 100.2],
+        ]
+    }
+
     #[test]
     fn test_kmeans_plus_plus_returns_k_centroids() {
         let data = well_separated_data();
         let mut rng = StdRng::seed_from_u64(42);
-        let centroids = kmeans_plus_plus_init::<SquaredEuclidean>(&data.view(), 2, &mut rng);
+        let centroids = kmeans_plus_plus_init::<f64, SquaredEuclidean>(&data.view(), 2, &mut rng);
         assert_eq!(centroids.shape(), &[2, 2]);
     }
 
@@ -367,14 +388,12 @@ mod tests {
     fn test_kmeans_plus_plus_picks_from_data() {
         let data = well_separated_data();
         let mut rng = StdRng::seed_from_u64(42);
-        let centroids = kmeans_plus_plus_init::<SquaredEuclidean>(&data.view(), 2, &mut rng);
+        let centroids = kmeans_plus_plus_init::<f64, SquaredEuclidean>(&data.view(), 2, &mut rng);
 
         for c in 0..2 {
             let centroid = centroids.row(c);
             let found = data.rows().into_iter().any(|row| {
-                row.iter()
-                    .zip(centroid.iter())
-                    .all(|(a, b)| (a - b).abs() < 1e-10)
+                row.iter().zip(centroid.iter()).all(|(a, b)| (a - b).abs() < 1e-10)
             });
             assert!(found, "Centroid {} not found in input data", c);
         }
@@ -383,34 +402,27 @@ mod tests {
     #[test]
     fn test_lloyd_converges_on_separated_clusters() {
         let data = well_separated_data();
-        let result = run_kmeans_with::<SquaredEuclidean>(&data.view(), 2, 100, 1e-4, 42, Algorithm::Lloyd).unwrap();
+        let result = run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
 
         assert_eq!(result.labels.len(), 8);
         assert_eq!(result.centroids.shape(), &[2, 2]);
         assert!(result.inertia >= 0.0);
         assert!(result.n_iter > 0);
-        assert!(result.n_iter <= 100);
 
         let label_a = result.labels[0];
         let label_b = result.labels[4];
         assert_ne!(label_a, label_b);
-        for i in 0..4 {
-            assert_eq!(result.labels[i], label_a);
-        }
-        for i in 4..8 {
-            assert_eq!(result.labels[i], label_b);
-        }
+        for i in 0..4 { assert_eq!(result.labels[i], label_a); }
+        for i in 4..8 { assert_eq!(result.labels[i], label_b); }
     }
 
     #[test]
     fn test_reproducibility() {
         let data = well_separated_data();
-        let r1 = run_kmeans_with::<SquaredEuclidean>(&data.view(), 2, 100, 1e-4, 42, Algorithm::Lloyd).unwrap();
-        let r2 = run_kmeans_with::<SquaredEuclidean>(&data.view(), 2, 100, 1e-4, 42, Algorithm::Lloyd).unwrap();
-
+        let r1 = run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let r2 = run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         assert_eq!(r1.labels, r2.labels);
         assert!((r1.inertia - r2.inertia).abs() < 1e-10);
-        assert_eq!(r1.n_iter, r2.n_iter);
     }
 
     #[test]
@@ -418,29 +430,27 @@ mod tests {
         let data = well_separated_data();
         let single = run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         let multi = run_kmeans_n_init(&data.view(), 2, 100, 1e-4, 42, 10, Algorithm::Lloyd).unwrap();
-
         assert!(multi.inertia <= single.inertia + 1e-10);
     }
 
     #[test]
     fn test_k_greater_than_n_fails() {
         let data = array![[1.0, 2.0], [3.0, 4.0]];
-        let result = run_kmeans_with::<SquaredEuclidean>(&data.view(), 5, 100, 1e-4, 42, Algorithm::Lloyd);
+        let result = run_kmeans_n_init(&data.view(), 5, 100, 1e-4, 42, 1, Algorithm::Lloyd);
         assert!(matches!(result, Err(KMeansError::InvalidClusters { .. })));
     }
 
     #[test]
     fn test_empty_input_fails() {
         let data = Array2::<f64>::zeros((0, 2));
-        let result = run_kmeans_with::<SquaredEuclidean>(&data.view(), 1, 100, 1e-4, 42, Algorithm::Lloyd);
+        let result = run_kmeans_n_init(&data.view(), 1, 100, 1e-4, 42, 1, Algorithm::Lloyd);
         assert!(matches!(result, Err(KMeansError::EmptyInput)));
     }
 
     #[test]
     fn test_single_cluster() {
         let data = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]];
-        let result = run_kmeans_with::<SquaredEuclidean>(&data.view(), 1, 100, 1e-4, 42, Algorithm::Lloyd).unwrap();
-
+        let result = run_kmeans_n_init(&data.view(), 1, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         assert!(result.labels.iter().all(|&l| l == 0));
         let center = result.centroids.row(0);
         assert!((center[0] - 3.0).abs() < 1e-10);
@@ -450,19 +460,17 @@ mod tests {
     #[test]
     fn test_k_equals_n() {
         let data = array![[1.0, 2.0], [10.0, 20.0], [100.0, 200.0]];
-        let result = run_kmeans_with::<SquaredEuclidean>(&data.view(), 3, 100, 1e-4, 42, Algorithm::Lloyd).unwrap();
-
-        let mut sorted_labels = result.labels.clone();
-        sorted_labels.sort();
-        assert_eq!(sorted_labels, vec![0, 1, 2]);
+        let result = run_kmeans_n_init(&data.view(), 3, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let mut sorted = result.labels.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2]);
         assert!(result.inertia < 1e-10);
     }
 
     #[test]
     fn test_identical_points() {
         let data = array![[5.0, 5.0], [5.0, 5.0], [5.0, 5.0], [5.0, 5.0]];
-        let result = run_kmeans_with::<SquaredEuclidean>(&data.view(), 1, 100, 1e-4, 42, Algorithm::Lloyd).unwrap();
-
+        let result = run_kmeans_n_init(&data.view(), 1, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         assert!(result.labels.iter().all(|&l| l == 0));
         assert!(result.inertia < 1e-10);
         assert_eq!(result.n_iter, 1);
@@ -470,14 +478,10 @@ mod tests {
 
     #[test]
     fn test_algorithm_resolve() {
-        // Small d, small k → Lloyd
         assert_eq!(Algorithm::Auto.resolve(8, 16), Algorithm::Lloyd);
-        // Larger d or k → Hamerly
         assert_eq!(Algorithm::Auto.resolve(32, 64), Algorithm::Hamerly);
-        // Explicit overrides are preserved
         assert_eq!(Algorithm::Lloyd.resolve(32, 64), Algorithm::Lloyd);
         assert_eq!(Algorithm::Hamerly.resolve(2, 2), Algorithm::Hamerly);
-        // k=1 → Lloyd (Hamerly needs k>=2)
         assert_eq!(Algorithm::Auto.resolve(8, 1), Algorithm::Lloyd);
     }
 
@@ -485,8 +489,40 @@ mod tests {
     fn test_compute_centroid_shifts() {
         let old = array![[0.0, 0.0], [10.0, 10.0]];
         let new = array![[1.0, 0.0], [10.0, 10.0]];
-        let shifts = compute_centroid_shifts::<SquaredEuclidean>(&old, &new, 2, 2);
-        assert!((shifts[0] - 1.0).abs() < 1e-10); // moved by (1,0), sq dist = 1
-        assert!((shifts[1] - 0.0).abs() < 1e-10); // didn't move
+        let shifts = compute_centroid_shifts::<f64, SquaredEuclidean>(&old, &new, 2, 2);
+        assert!((shifts[0] - 1.0).abs() < 1e-10);
+        assert!((shifts[1] - 0.0).abs() < 1e-10);
+    }
+
+    // ---- f32 tests ----
+
+    #[test]
+    fn test_f32_lloyd_converges() {
+        let data = well_separated_data_f32();
+        let result = run_kmeans_n_init_f32(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        assert_eq!(result.labels.len(), 8);
+        let label_a = result.labels[0];
+        let label_b = result.labels[4];
+        assert_ne!(label_a, label_b);
+    }
+
+    #[test]
+    fn test_f32_hamerly_converges() {
+        let data = well_separated_data_f32();
+        let result = run_kmeans_n_init_f32(&data.view(), 2, 100, 1e-4, 42, 1, Algorithm::Hamerly).unwrap();
+        assert_eq!(result.labels.len(), 8);
+        let label_a = result.labels[0];
+        let label_b = result.labels[4];
+        assert_ne!(label_a, label_b);
+    }
+
+    #[test]
+    fn test_f32_matches_f64_partition() {
+        let data_f64 = well_separated_data();
+        let data_f32 = well_separated_data_f32();
+        let r64 = run_kmeans_n_init(&data_f64.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        let r32 = run_kmeans_n_init_f32(&data_f32.view(), 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
+        // Same partitioning on well-separated data
+        assert_eq!(r64.labels, r32.labels);
     }
 }

@@ -14,59 +14,59 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rayon::prelude::*;
 
-use crate::distance::Distance;
+use crate::distance::{Distance, Scalar};
 use crate::error::KMeansError;
 use crate::kmeans::{compute_centroid_shifts, recompute_centroids, KMeansState};
 use crate::utils::assign_nearest_two_with;
 
-/// Run Hamerly's K-means iteration loop.
+/// Run Hamerly's K-means iteration loop, generic over float type and distance.
 ///
 /// Expects centroids to be already initialized (via kmeans++).
 /// Requires k >= 2 (caller must enforce this).
-pub fn run_hamerly_iterations<D: Distance>(
-    data_slice: &[f64],
-    centroids: &mut Array2<f64>,
+/// Bounds are tracked in f64 for precision regardless of F.
+pub fn run_hamerly_iterations<F: Scalar, D: Distance<F>>(
+    data_slice: &[F],
+    centroids: &mut Array2<F>,
     n: usize,
     d: usize,
     k: usize,
     max_iter: usize,
     tol: f64,
     rng: &mut StdRng,
-) -> Result<KMeansState, KMeansError> {
+) -> Result<KMeansState<F>, KMeansError> {
     debug_assert!(k >= 2, "Hamerly requires k >= 2");
 
     let mut labels = vec![0usize; n];
-    let mut upper = vec![f64::MAX; n]; // upper bound on dist to assigned centroid
-    let mut lower = vec![0.0f64; n];   // lower bound on dist to second-closest centroid
-    let mut inertia;
+    let mut upper = vec![f64::MAX; n]; // bounds in f64 for precision
+    let mut lower = vec![0.0f64; n];
+    let mut inertia: f64;
     let mut n_iter;
 
-    // --- Initial full assignment (like one Lloyd iteration) ---
+    // --- Initial full assignment ---
     {
         let centroids_slice = centroids.as_slice().expect("centroids are C-contiguous");
 
-        let assignments: Vec<(usize, f64, f64)> = (0..n)
+        let assignments: Vec<(usize, F, F)> = (0..n)
             .into_par_iter()
             .map(|i| {
                 let point = &data_slice[i * d..(i + 1) * d];
-                assign_nearest_two_with::<D>(point, centroids_slice, k, d)
+                assign_nearest_two_with::<F, D>(point, centroids_slice, k, d)
             })
             .collect();
 
         inertia = 0.0;
         for (i, &(label, best_dist, second_dist)) in assignments.iter().enumerate() {
             labels[i] = label;
-            upper[i] = best_dist.sqrt(); // Hamerly bounds work on actual distances, not squared
-            lower[i] = second_dist.sqrt();
-            inertia += best_dist;
+            upper[i] = best_dist.to_f64_lossy().sqrt();
+            lower[i] = second_dist.to_f64_lossy().sqrt();
+            inertia += best_dist.to_f64_lossy();
         }
 
         let old_centroids = centroids.clone();
         recompute_centroids(data_slice, &labels, centroids, n, d, k);
         handle_empty_clusters_hamerly(data_slice, &labels, &upper, centroids, n, d, k, rng);
 
-        // Update bounds with initial centroid shifts
-        let shifts = compute_centroid_shifts::<D>(&old_centroids, centroids, k, d);
+        let shifts = compute_centroid_shifts::<F, D>(&old_centroids, centroids, k, d);
         let sqrt_shifts: Vec<f64> = shifts.iter().map(|&s| s.sqrt()).collect();
         let max_shift = sqrt_shifts.iter().cloned().fold(0.0f64, f64::max);
 
@@ -78,7 +78,6 @@ pub fn run_hamerly_iterations<D: Distance>(
         n_iter = 1;
 
         if max_shift * max_shift < tol {
-            // Already converged after init
             return Ok(KMeansState {
                 centroids: centroids.clone(),
                 labels,
@@ -92,37 +91,30 @@ pub fn run_hamerly_iterations<D: Distance>(
     for iter in 1..max_iter {
         let centroids_slice = centroids.as_slice().expect("centroids are C-contiguous");
 
-        // Compute half inter-centroid distances for global filter
-        let center_half_dists = compute_center_half_dists::<D>(centroids_slice, k, d);
+        let center_half_dists = compute_center_half_dists::<F, D>(centroids_slice, k, d);
 
-        // Point-level filtering and update (parallel)
-        // We collect updates, then apply them sequentially (avoids mutable aliasing issues)
         let point_results: Vec<Option<(usize, usize, f64, f64)>> = (0..n)
             .into_par_iter()
             .map(|i| {
                 let m = upper[i].max(0.0);
                 let lo = lower[i];
 
-                // Global filter: if upper bound <= lower bound, skip
                 if m <= lo {
                     return None;
                 }
 
-                // Tighter filter: if upper bound <= half distance to nearest other centroid
                 if m <= center_half_dists[labels[i]] {
                     return None;
                 }
 
-                // Need to recompute — do full distance scan
                 let point = &data_slice[i * d..(i + 1) * d];
                 let (new_label, best_dist, second_dist) =
-                    assign_nearest_two_with::<D>(point, centroids_slice, k, d);
+                    assign_nearest_two_with::<F, D>(point, centroids_slice, k, d);
 
-                Some((i, new_label, best_dist.sqrt(), second_dist.sqrt()))
+                Some((i, new_label, best_dist.to_f64_lossy().sqrt(), second_dist.to_f64_lossy().sqrt()))
             })
             .collect();
 
-        // Apply point updates
         for result in &point_results {
             if let Some((i, new_label, new_upper, new_lower)) = result {
                 labels[*i] = *new_label;
@@ -131,23 +123,16 @@ pub fn run_hamerly_iterations<D: Distance>(
             }
         }
 
-        // Recompute centroids
         let old_centroids = centroids.clone();
         recompute_centroids(data_slice, &labels, centroids, n, d, k);
-
-        // Handle empty clusters
         handle_empty_clusters_hamerly(data_slice, &labels, &upper, centroids, n, d, k, rng);
 
-        // Compute per-centroid shifts
-        let shifts = compute_centroid_shifts::<D>(&old_centroids, centroids, k, d);
+        let shifts = compute_centroid_shifts::<F, D>(&old_centroids, centroids, k, d);
         let sqrt_shifts: Vec<f64> = shifts.iter().map(|&s| s.sqrt()).collect();
         let max_shift = sqrt_shifts.iter().cloned().fold(0.0f64, f64::max);
 
-        // Update bounds for all points
         for i in 0..n {
             upper[i] += sqrt_shifts[labels[i]];
-            // Lower bound decreases by the max shift of any centroid OTHER than assigned.
-            // Conservative: just use the global max shift.
             lower[i] -= max_shift;
             if lower[i] < 0.0 {
                 lower[i] = 0.0;
@@ -156,7 +141,6 @@ pub fn run_hamerly_iterations<D: Distance>(
 
         n_iter = iter + 1;
 
-        // Convergence: max squared shift < tol
         let max_sq_shift = shifts.iter().cloned().fold(0.0f64, f64::max);
         if max_sq_shift < tol {
             break;
@@ -170,7 +154,7 @@ pub fn run_hamerly_iterations<D: Distance>(
         .map(|i| {
             let point = &data_slice[i * d..(i + 1) * d];
             let centroid = &centroids_slice[labels[i] * d..(labels[i] + 1) * d];
-            D::distance(point, centroid)
+            D::distance(point, centroid).to_f64_lossy()
         })
         .sum();
 
@@ -183,8 +167,11 @@ pub fn run_hamerly_iterations<D: Distance>(
 }
 
 /// Compute half the minimum inter-centroid distance for each centroid.
-/// Used as a filter: if a point's upper bound <= this value, it can't change clusters.
-fn compute_center_half_dists<D: Distance>(centroids_slice: &[f64], k: usize, d: usize) -> Vec<f64> {
+fn compute_center_half_dists<F: Scalar, D: Distance<F>>(
+    centroids_slice: &[F],
+    k: usize,
+    d: usize,
+) -> Vec<f64> {
     let mut half_dists = vec![f64::MAX; k];
 
     for j in 0..k {
@@ -194,7 +181,7 @@ fn compute_center_half_dists<D: Distance>(centroids_slice: &[f64], k: usize, d: 
                 continue;
             }
             let cl = &centroids_slice[l * d..(l + 1) * d];
-            let dist = D::distance(cj, cl).sqrt();
+            let dist = D::distance(cj, cl).to_f64_lossy().sqrt();
             let half = dist * 0.5;
             if half < half_dists[j] {
                 half_dists[j] = half;
@@ -205,12 +192,12 @@ fn compute_center_half_dists<D: Distance>(centroids_slice: &[f64], k: usize, d: 
     half_dists
 }
 
-/// Re-seed empty clusters for Hamerly (uses upper bounds as distance proxy).
-fn handle_empty_clusters_hamerly(
-    data_slice: &[f64],
+/// Re-seed empty clusters for Hamerly.
+fn handle_empty_clusters_hamerly<F: Scalar>(
+    data_slice: &[F],
     labels: &[usize],
     upper_bounds: &[f64],
-    centroids: &mut Array2<f64>,
+    centroids: &mut Array2<F>,
     n: usize,
     d: usize,
     k: usize,
@@ -225,7 +212,6 @@ fn handle_empty_clusters_hamerly(
 
     for cluster in 0..k {
         if counts[cluster] == 0 {
-            // Find the point with the largest upper bound (farthest from its centroid)
             let farthest = upper_bounds
                 .iter()
                 .enumerate()
@@ -244,11 +230,13 @@ fn handle_empty_clusters_hamerly(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::distance::SquaredEuclidean;
     use crate::kmeans::{kmeans_plus_plus_init, Algorithm};
     use ndarray::array;
+    use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    use super::*;
 
     fn well_separated_data() -> Array2<f64> {
         array![
@@ -268,32 +256,26 @@ mod tests {
         let data = well_separated_data();
         let data_slice = data.as_slice().unwrap();
         let mut rng = StdRng::seed_from_u64(42);
-        let mut centroids = kmeans_plus_plus_init::<SquaredEuclidean>(&data.view(), 2, &mut rng);
+        let mut centroids = kmeans_plus_plus_init::<f64, SquaredEuclidean>(&data.view(), 2, &mut rng);
 
-        let result = run_hamerly_iterations::<SquaredEuclidean>(data_slice, &mut centroids, 8, 2, 2, 100, 1e-4, &mut rng).unwrap();
+        let result = run_hamerly_iterations::<f64, SquaredEuclidean>(data_slice, &mut centroids, 8, 2, 2, 100, 1e-4, &mut rng).unwrap();
 
         assert_eq!(result.labels.len(), 8);
         let label_a = result.labels[0];
         let label_b = result.labels[4];
         assert_ne!(label_a, label_b);
-        for i in 0..4 {
-            assert_eq!(result.labels[i], label_a);
-        }
-        for i in 4..8 {
-            assert_eq!(result.labels[i], label_b);
-        }
+        for i in 0..4 { assert_eq!(result.labels[i], label_a); }
+        for i in 4..8 { assert_eq!(result.labels[i], label_b); }
     }
 
     #[test]
     fn test_hamerly_matches_lloyd() {
-        // Both algorithms with same init should produce same results
         let data = well_separated_data();
         let view = data.view();
 
         let lloyd = crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Lloyd).unwrap();
         let hamerly = crate::kmeans::run_kmeans_n_init(&view, 2, 100, 1e-4, 42, 1, Algorithm::Hamerly).unwrap();
 
-        // Same labels (possibly permuted cluster IDs, but same partitioning)
         assert_eq!(lloyd.labels, hamerly.labels);
         assert!((lloyd.inertia - hamerly.inertia).abs() < 1e-6);
     }
@@ -312,19 +294,15 @@ mod tests {
 
     #[test]
     fn test_hamerly_larger_dataset() {
-        // Generate a more challenging dataset
         let mut data_vec = Vec::new();
-        // Cluster around (0,0,0)
         for i in 0..50 {
             let f = i as f64 * 0.01;
             data_vec.extend_from_slice(&[f, f, f]);
         }
-        // Cluster around (50,50,50)
         for i in 0..50 {
             let f = 50.0 + i as f64 * 0.01;
             data_vec.extend_from_slice(&[f, f, f]);
         }
-        // Cluster around (100,100,100)
         for i in 0..50 {
             let f = 100.0 + i as f64 * 0.01;
             data_vec.extend_from_slice(&[f, f, f]);
@@ -335,16 +313,14 @@ mod tests {
         let result = crate::kmeans::run_kmeans_n_init(&view, 3, 100, 1e-4, 42, 1, Algorithm::Hamerly).unwrap();
         assert_eq!(result.labels.len(), 150);
         assert!(result.inertia >= 0.0);
-        // Should find 3 distinct clusters
         let unique: std::collections::HashSet<_> = result.labels.iter().collect();
         assert_eq!(unique.len(), 3);
     }
 
     #[test]
     fn test_center_half_dists() {
-        // Two centroids at (0,0) and (10,0), distance = 10, half = 5
-        let centroids = [0.0, 0.0, 10.0, 0.0];
-        let half_dists = compute_center_half_dists::<SquaredEuclidean>(&centroids, 2, 2);
+        let centroids = [0.0f64, 0.0, 10.0, 0.0];
+        let half_dists = compute_center_half_dists::<f64, SquaredEuclidean>(&centroids, 2, 2);
         assert!((half_dists[0] - 5.0).abs() < 1e-10);
         assert!((half_dists[1] - 5.0).abs() < 1e-10);
     }

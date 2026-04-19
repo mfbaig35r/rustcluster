@@ -1,98 +1,38 @@
 use ndarray::ArrayView2;
+use num_traits::Float;
 
-use crate::distance::Distance;
+use crate::distance::{Distance, Scalar};
 use crate::error::KMeansError;
+
+// ---- Generic kernels (Layer 3) ----
 
 /// Squared Euclidean distance between two equal-length slices.
 ///
-/// This is the hot inner kernel — structured as a simple counted loop over
-/// contiguous slices so LLVM can auto-vectorize to SIMD (SSE2/AVX2 on x86,
-/// NEON on ARM).
+/// The hot inner kernel — simple counted loop for LLVM auto-vectorization.
 #[inline(always)]
-pub fn squared_euclidean(a: &[f64], b: &[f64]) -> f64 {
+pub fn squared_euclidean_generic<F: Scalar>(a: &[F], b: &[F]) -> F {
     debug_assert_eq!(a.len(), b.len());
-    let mut acc = 0.0;
+    let mut acc = F::zero();
     for i in 0..a.len() {
         let diff = a[i] - b[i];
-        acc += diff * diff;
+        acc = acc + diff * diff;
     }
     acc
 }
 
-/// Find the nearest centroid for a single point.
-///
-/// `centroids` is a flat row-major buffer of shape (k, d).
-/// Returns (cluster_index, squared_distance).
+/// Find nearest centroid using a generic distance metric and scalar type.
 #[inline]
-pub fn assign_nearest(point: &[f64], centroids: &[f64], k: usize, d: usize) -> (usize, f64) {
-    debug_assert_eq!(centroids.len(), k * d);
-    debug_assert_eq!(point.len(), d);
-
-    let mut best_idx = 0;
-    let mut best_dist = f64::MAX;
-
-    for cluster in 0..k {
-        let centroid = &centroids[cluster * d..(cluster + 1) * d];
-        let dist = squared_euclidean(point, centroid);
-        if dist < best_dist {
-            best_dist = dist;
-            best_idx = cluster;
-        }
-    }
-
-    (best_idx, best_dist)
-}
-
-/// Find the nearest and second-nearest centroid for a single point.
-///
-/// `centroids` is a flat row-major buffer of shape (k, d).
-/// Returns (nearest_idx, nearest_dist, second_nearest_dist).
-/// Requires k >= 2.
-#[inline]
-pub fn assign_nearest_two(
-    point: &[f64],
-    centroids: &[f64],
+pub fn assign_nearest_with<F: Scalar, D: Distance<F>>(
+    point: &[F],
+    centroids: &[F],
     k: usize,
     d: usize,
-) -> (usize, f64, f64) {
-    debug_assert!(k >= 2);
+) -> (usize, F) {
     debug_assert_eq!(centroids.len(), k * d);
     debug_assert_eq!(point.len(), d);
 
     let mut best_idx = 0;
-    let mut best_dist = f64::MAX;
-    let mut second_dist = f64::MAX;
-
-    for cluster in 0..k {
-        let centroid = &centroids[cluster * d..(cluster + 1) * d];
-        let dist = squared_euclidean(point, centroid);
-        if dist < best_dist {
-            second_dist = best_dist;
-            best_dist = dist;
-            best_idx = cluster;
-        } else if dist < second_dist {
-            second_dist = dist;
-        }
-    }
-
-    (best_idx, best_dist, second_dist)
-}
-
-// ---- Distance-generic variants ----
-
-/// Find the nearest centroid using a generic distance metric.
-#[inline]
-pub fn assign_nearest_with<D: Distance>(
-    point: &[f64],
-    centroids: &[f64],
-    k: usize,
-    d: usize,
-) -> (usize, f64) {
-    debug_assert_eq!(centroids.len(), k * d);
-    debug_assert_eq!(point.len(), d);
-
-    let mut best_idx = 0;
-    let mut best_dist = f64::MAX;
+    let mut best_dist = F::max_value();
 
     for cluster in 0..k {
         let centroid = &centroids[cluster * d..(cluster + 1) * d];
@@ -106,21 +46,21 @@ pub fn assign_nearest_with<D: Distance>(
     (best_idx, best_dist)
 }
 
-/// Find nearest and second-nearest centroid using a generic distance metric.
+/// Find nearest and second-nearest centroid, generic over distance and scalar.
 #[inline]
-pub fn assign_nearest_two_with<D: Distance>(
-    point: &[f64],
-    centroids: &[f64],
+pub fn assign_nearest_two_with<F: Scalar, D: Distance<F>>(
+    point: &[F],
+    centroids: &[F],
     k: usize,
     d: usize,
-) -> (usize, f64, f64) {
+) -> (usize, F, F) {
     debug_assert!(k >= 2);
     debug_assert_eq!(centroids.len(), k * d);
     debug_assert_eq!(point.len(), d);
 
     let mut best_idx = 0;
-    let mut best_dist = f64::MAX;
-    let mut second_dist = f64::MAX;
+    let mut best_dist = F::max_value();
+    let mut second_dist = F::max_value();
 
     for cluster in 0..k {
         let centroid = &centroids[cluster * d..(cluster + 1) * d];
@@ -136,21 +76,21 @@ pub fn assign_nearest_two_with<D: Distance>(
 
     (best_idx, best_dist, second_dist)
 }
+
+// ---- Validation (generic over Scalar) ----
 
 /// Validate that input data is non-empty and contains only finite values.
-pub fn validate_data(data: &ArrayView2<f64>) -> Result<(), KMeansError> {
+pub fn validate_data_generic<F: Scalar>(data: &ArrayView2<F>) -> Result<(), KMeansError> {
     let (n, d) = data.dim();
     if n == 0 || d == 0 {
         return Err(KMeansError::EmptyInput);
     }
 
-    // Check for NaN/Inf — iterate the raw slice (C-contiguous guaranteed by caller)
     if let Some(slice) = data.as_slice() {
         if slice.iter().any(|v| !v.is_finite()) {
             return Err(KMeansError::NonFinite);
         }
     } else {
-        // Fallback for non-contiguous (shouldn't happen after boundary check)
         for row in data.rows() {
             if row.iter().any(|v| !v.is_finite()) {
                 return Err(KMeansError::NonFinite);
@@ -162,8 +102,8 @@ pub fn validate_data(data: &ArrayView2<f64>) -> Result<(), KMeansError> {
 }
 
 /// Validate that prediction data matches the fitted model's dimensionality.
-pub fn validate_predict_data(
-    data: &ArrayView2<f64>,
+pub fn validate_predict_data_generic<F: Scalar>(
+    data: &ArrayView2<F>,
     expected_d: usize,
 ) -> Result<(), KMeansError> {
     let (n, d) = data.dim();
@@ -179,6 +119,46 @@ pub fn validate_predict_data(
     Ok(())
 }
 
+// ---- f64-specific wrappers (backward compat for bench API) ----
+
+/// Squared Euclidean distance (f64).
+#[inline(always)]
+pub fn squared_euclidean(a: &[f64], b: &[f64]) -> f64 {
+    squared_euclidean_generic(a, b)
+}
+
+/// Find nearest centroid (f64, squared Euclidean).
+#[inline]
+pub fn assign_nearest(point: &[f64], centroids: &[f64], k: usize, d: usize) -> (usize, f64) {
+    use crate::distance::SquaredEuclidean;
+    assign_nearest_with::<f64, SquaredEuclidean>(point, centroids, k, d)
+}
+
+/// Find nearest and second-nearest centroid (f64, squared Euclidean).
+#[inline]
+pub fn assign_nearest_two(
+    point: &[f64],
+    centroids: &[f64],
+    k: usize,
+    d: usize,
+) -> (usize, f64, f64) {
+    use crate::distance::SquaredEuclidean;
+    assign_nearest_two_with::<f64, SquaredEuclidean>(point, centroids, k, d)
+}
+
+/// Validate f64 data.
+pub fn validate_data(data: &ArrayView2<f64>) -> Result<(), KMeansError> {
+    validate_data_generic(data)
+}
+
+/// Validate f64 prediction data.
+pub fn validate_predict_data(
+    data: &ArrayView2<f64>,
+    expected_d: usize,
+) -> Result<(), KMeansError> {
+    validate_predict_data_generic(data, expected_d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,8 +168,14 @@ mod tests {
     fn test_squared_euclidean_basic() {
         let a = [1.0, 2.0, 3.0];
         let b = [4.0, 5.0, 6.0];
-        // (3^2 + 3^2 + 3^2) = 27
         assert!((squared_euclidean(&a, &b) - 27.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_squared_euclidean_f32() {
+        let a = [1.0f32, 2.0, 3.0];
+        let b = [4.0f32, 5.0, 6.0];
+        assert!((squared_euclidean_generic(&a, &b) - 27.0).abs() < 1e-4);
     }
 
     #[test]
@@ -207,17 +193,14 @@ mod tests {
 
     #[test]
     fn test_assign_nearest() {
-        // Two centroids in 2D: (0,0) and (10,10)
         let centroids = [0.0, 0.0, 10.0, 10.0];
         let k = 2;
         let d = 2;
 
-        // Point near first centroid
         let (idx, dist) = assign_nearest(&[1.0, 1.0], &centroids, k, d);
         assert_eq!(idx, 0);
         assert!((dist - 2.0).abs() < 1e-10);
 
-        // Point near second centroid
         let (idx, dist) = assign_nearest(&[9.0, 9.0], &centroids, k, d);
         assert_eq!(idx, 1);
         assert!((dist - 2.0).abs() < 1e-10);
@@ -225,39 +208,26 @@ mod tests {
 
     #[test]
     fn test_assign_nearest_three_centroids() {
-        // Three centroids: (0,0), (5,5), (10,0)
         let centroids = [0.0, 0.0, 5.0, 5.0, 10.0, 0.0];
-        let k = 3;
-        let d = 2;
-
-        let (idx, _) = assign_nearest(&[4.0, 4.0], &centroids, k, d);
-        assert_eq!(idx, 1); // closest to (5,5)
-
-        let (idx, _) = assign_nearest(&[9.0, 1.0], &centroids, k, d);
-        assert_eq!(idx, 2); // closest to (10,0)
+        let (idx, _) = assign_nearest(&[4.0, 4.0], &centroids, 3, 2);
+        assert_eq!(idx, 1);
+        let (idx, _) = assign_nearest(&[9.0, 1.0], &centroids, 3, 2);
+        assert_eq!(idx, 2);
     }
 
     #[test]
     fn test_assign_nearest_two() {
-        // Three centroids: (0,0), (5,5), (10,0)
         let centroids = [0.0, 0.0, 5.0, 5.0, 10.0, 0.0];
-        let k = 3;
-        let d = 2;
-
-        let (idx, best, second) = assign_nearest_two(&[1.0, 1.0], &centroids, k, d);
-        assert_eq!(idx, 0); // closest to (0,0)
-        assert!((best - 2.0).abs() < 1e-10); // dist to (0,0) = 1+1 = 2
-        assert!(second > best); // second-nearest is farther
-        // second should be dist to (5,5) = 16+16 = 32
+        let (idx, best, second) = assign_nearest_two(&[1.0, 1.0], &centroids, 3, 2);
+        assert_eq!(idx, 0);
+        assert!((best - 2.0).abs() < 1e-10);
         assert!((second - 32.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_assign_nearest_two_symmetric() {
-        // Two centroids equidistant
         let centroids = [0.0, 0.0, 10.0, 0.0];
         let (idx, best, second) = assign_nearest_two(&[5.0, 0.0], &centroids, 2, 2);
-        // Both at distance 25
         assert!((best - 25.0).abs() < 1e-10);
         assert!((second - 25.0).abs() < 1e-10);
         assert!(idx == 0 || idx == 1);
@@ -272,28 +242,19 @@ mod tests {
     #[test]
     fn test_validate_data_empty() {
         let data = ndarray::Array2::<f64>::zeros((0, 2));
-        assert!(matches!(
-            validate_data(&data.view()),
-            Err(KMeansError::EmptyInput)
-        ));
+        assert!(matches!(validate_data(&data.view()), Err(KMeansError::EmptyInput)));
     }
 
     #[test]
     fn test_validate_data_nan() {
         let data = array![[1.0, f64::NAN], [3.0, 4.0]];
-        assert!(matches!(
-            validate_data(&data.view()),
-            Err(KMeansError::NonFinite)
-        ));
+        assert!(matches!(validate_data(&data.view()), Err(KMeansError::NonFinite)));
     }
 
     #[test]
     fn test_validate_data_inf() {
         let data = array![[1.0, f64::INFINITY], [3.0, 4.0]];
-        assert!(matches!(
-            validate_data(&data.view()),
-            Err(KMeansError::NonFinite)
-        ));
+        assert!(matches!(validate_data(&data.view()), Err(KMeansError::NonFinite)));
     }
 
     #[test]
@@ -301,10 +262,16 @@ mod tests {
         let data = array![[1.0, 2.0, 3.0]];
         assert!(matches!(
             validate_predict_data(&data.view(), 2),
-            Err(KMeansError::DimensionMismatch {
-                expected: 2,
-                got: 3
-            })
+            Err(KMeansError::DimensionMismatch { expected: 2, got: 3 })
         ));
+    }
+
+    #[test]
+    fn test_validate_f32_data() {
+        let data = ndarray::array![[1.0f32, 2.0], [3.0, 4.0]];
+        assert!(validate_data_generic(&data.view()).is_ok());
+
+        let bad = ndarray::array![[1.0f32, f32::NAN]];
+        assert!(matches!(validate_data_generic(&bad.view()), Err(KMeansError::NonFinite)));
     }
 }
