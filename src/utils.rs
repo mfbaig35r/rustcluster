@@ -1,5 +1,6 @@
 use ndarray::ArrayView2;
 
+use crate::distance::Distance;
 use crate::error::KMeansError;
 
 /// Squared Euclidean distance between two equal-length slices.
@@ -65,6 +66,65 @@ pub fn assign_nearest_two(
     for cluster in 0..k {
         let centroid = &centroids[cluster * d..(cluster + 1) * d];
         let dist = squared_euclidean(point, centroid);
+        if dist < best_dist {
+            second_dist = best_dist;
+            best_dist = dist;
+            best_idx = cluster;
+        } else if dist < second_dist {
+            second_dist = dist;
+        }
+    }
+
+    (best_idx, best_dist, second_dist)
+}
+
+// ---- Distance-generic variants ----
+
+/// Find the nearest centroid using a generic distance metric.
+#[inline]
+pub fn assign_nearest_with<D: Distance>(
+    point: &[f64],
+    centroids: &[f64],
+    k: usize,
+    d: usize,
+) -> (usize, f64) {
+    debug_assert_eq!(centroids.len(), k * d);
+    debug_assert_eq!(point.len(), d);
+
+    let mut best_idx = 0;
+    let mut best_dist = f64::MAX;
+
+    for cluster in 0..k {
+        let centroid = &centroids[cluster * d..(cluster + 1) * d];
+        let dist = D::distance(point, centroid);
+        if dist < best_dist {
+            best_dist = dist;
+            best_idx = cluster;
+        }
+    }
+
+    (best_idx, best_dist)
+}
+
+/// Find nearest and second-nearest centroid using a generic distance metric.
+#[inline]
+pub fn assign_nearest_two_with<D: Distance>(
+    point: &[f64],
+    centroids: &[f64],
+    k: usize,
+    d: usize,
+) -> (usize, f64, f64) {
+    debug_assert!(k >= 2);
+    debug_assert_eq!(centroids.len(), k * d);
+    debug_assert_eq!(point.len(), d);
+
+    let mut best_idx = 0;
+    let mut best_dist = f64::MAX;
+    let mut second_dist = f64::MAX;
+
+    for cluster in 0..k {
+        let centroid = &centroids[cluster * d..(cluster + 1) * d];
+        let dist = D::distance(point, centroid);
         if dist < best_dist {
             second_dist = best_dist;
             best_dist = dist;

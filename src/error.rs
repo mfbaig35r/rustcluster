@@ -1,6 +1,3 @@
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use pyo3::PyErr;
-
 #[derive(Debug, thiserror::Error)]
 pub enum KMeansError {
     #[error("Input array must be 2-dimensional")]
@@ -37,11 +34,14 @@ pub enum KMeansError {
     InvalidAlgorithm(String),
 }
 
-impl From<KMeansError> for PyErr {
-    fn from(err: KMeansError) -> PyErr {
+#[cfg(feature = "python")]
+impl From<KMeansError> for pyo3::PyErr {
+    fn from(err: KMeansError) -> pyo3::PyErr {
         match &err {
-            KMeansError::NotFitted => PyRuntimeError::new_err(err.to_string()),
-            _ => PyValueError::new_err(err.to_string()),
+            KMeansError::NotFitted => {
+                pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
+            }
+            _ => pyo3::exceptions::PyValueError::new_err(err.to_string()),
         }
     }
 }
