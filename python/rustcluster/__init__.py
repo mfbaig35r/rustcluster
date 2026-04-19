@@ -147,6 +147,17 @@ class KMeans:
             f"metric=\"{self._metric}\")"
         )
 
+    def __getstate__(self):
+        return {"model_state": self._model.__getstate__(), "params": {
+            "n_clusters": self._n_clusters, "max_iter": self._max_iter,
+            "tol": self._tol, "random_state": self._random_state,
+            "n_init": self._n_init, "algorithm": self._algorithm, "metric": self._metric,
+        }}
+
+    def __setstate__(self, state):
+        self.__init__(**state["params"])
+        self._model.__setstate__(state["model_state"])
+
 
 class MiniBatchKMeans:
     """Mini-batch K-means clustering backed by a Rust implementation.
@@ -261,6 +272,17 @@ class MiniBatchKMeans:
             f"max_no_improvement={self._max_no_improvement}, metric=\"{self._metric}\")"
         )
 
+    def __getstate__(self):
+        return {"model_state": self._model.__getstate__(), "params": {
+            "n_clusters": self._n_clusters, "batch_size": self._batch_size,
+            "max_iter": self._max_iter, "tol": self._tol, "random_state": self._random_state,
+            "max_no_improvement": self._max_no_improvement, "metric": self._metric,
+        }}
+
+    def __setstate__(self, state):
+        self.__init__(**state["params"])
+        self._model.__setstate__(state["model_state"])
+
 
 class DBSCAN:
     """DBSCAN clustering backed by a Rust implementation.
@@ -330,6 +352,15 @@ class DBSCAN:
             f"DBSCAN(eps={self._eps}, min_samples={self._min_samples}, "
             f"metric=\"{self._metric}\")"
         )
+
+    def __getstate__(self):
+        return {"model_state": self._model.__getstate__(), "params": {
+            "eps": self._eps, "min_samples": self._min_samples, "metric": self._metric,
+        }}
+
+    def __setstate__(self, state):
+        self.__init__(**state["params"])
+        self._model.__setstate__(state["model_state"])
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +449,16 @@ class HDBSCAN:
             f"cluster_selection_method=\"{self._cluster_selection_method}\")"
         )
 
+    def __getstate__(self):
+        return {"model_state": self._model.__getstate__(), "params": {
+            "min_cluster_size": self._min_cluster_size, "min_samples": self._min_samples,
+            "metric": self._metric, "cluster_selection_method": self._cluster_selection_method,
+        }}
+
+    def __setstate__(self, state):
+        self.__init__(**state["params"])
+        self._model.__setstate__(state["model_state"])
+
 
 class AgglomerativeClustering:
     """Agglomerative (hierarchical) clustering backed by a Rust implementation.
@@ -495,6 +536,15 @@ class AgglomerativeClustering:
             f"AgglomerativeClustering(n_clusters={self._n_clusters}, "
             f"linkage=\"{self._linkage}\", metric=\"{self._metric}\")"
         )
+
+    def __getstate__(self):
+        return {"model_state": self._model.__getstate__(), "params": {
+            "n_clusters": self._n_clusters, "linkage": self._linkage, "metric": self._metric,
+        }}
+
+    def __setstate__(self, state):
+        self.__init__(**state["params"])
+        self._model.__setstate__(state["model_state"])
 
 
 # ---------------------------------------------------------------------------

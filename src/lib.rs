@@ -307,6 +307,71 @@ mod python_bindings {
                 self.n_clusters, self.max_iter, self.tol, self.random_state, self.n_init, algo_str, met_str
             )
         }
+
+        fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("n_clusters", self.n_clusters)?;
+            dict.set_item("max_iter", self.max_iter)?;
+            dict.set_item("tol", self.tol)?;
+            dict.set_item("random_state", self.random_state)?;
+            dict.set_item("n_init", self.n_init)?;
+            dict.set_item("algorithm", match self.algorithm { Algorithm::Auto => "auto", Algorithm::Lloyd => "lloyd", Algorithm::Hamerly => "hamerly" })?;
+            dict.set_item("metric", metric_str(self.metric))?;
+            match &self.fitted {
+                None => { dict.set_item("fitted", false)?; }
+                Some(FittedState::F64(s)) => {
+                    dict.set_item("fitted", true)?;
+                    dict.set_item("dtype", "float64")?;
+                    dict.set_item("centroids", PyArray2::from_owned_array(py, s.centroids.clone()))?;
+                    dict.set_item("labels", s.labels.iter().map(|&l| l as i64).collect::<Vec<_>>())?;
+                    dict.set_item("inertia", s.inertia)?;
+                    dict.set_item("n_iter", s.n_iter)?;
+                }
+                Some(FittedState::F32(s)) => {
+                    dict.set_item("fitted", true)?;
+                    dict.set_item("dtype", "float32")?;
+                    dict.set_item("centroids", PyArray2::from_owned_array(py, s.centroids.clone()))?;
+                    dict.set_item("labels", s.labels.iter().map(|&l| l as i64).collect::<Vec<_>>())?;
+                    dict.set_item("inertia", s.inertia)?;
+                    dict.set_item("n_iter", s.n_iter)?;
+                }
+            }
+            Ok(dict.into())
+        }
+
+        fn __setstate__(&mut self, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+            self.n_clusters = state.get_item("n_clusters")?.unwrap().extract()?;
+            self.max_iter = state.get_item("max_iter")?.unwrap().extract()?;
+            self.tol = state.get_item("tol")?.unwrap().extract()?;
+            self.random_state = state.get_item("random_state")?.unwrap().extract()?;
+            self.n_init = state.get_item("n_init")?.unwrap().extract()?;
+            let algo_s: String = state.get_item("algorithm")?.unwrap().extract()?;
+            self.algorithm = Algorithm::from_str(&algo_s)?;
+            let met_s: String = state.get_item("metric")?.unwrap().extract()?;
+            self.metric = Metric::from_str(&met_s)?;
+            let is_fitted: bool = state.get_item("fitted")?.unwrap().extract()?;
+            if is_fitted {
+                let dtype: String = state.get_item("dtype")?.unwrap().extract()?;
+                let labels_i64: Vec<i64> = state.get_item("labels")?.unwrap().extract()?;
+                let labels: Vec<usize> = labels_i64.iter().map(|&l| l as usize).collect();
+                let inertia: f64 = state.get_item("inertia")?.unwrap().extract()?;
+                let n_iter: usize = state.get_item("n_iter")?.unwrap().extract()?;
+                if dtype == "float32" {
+                    let arr = state.get_item("centroids")?.unwrap().extract::<PyReadonlyArray2<'_, f32>>()?;
+                    self.fitted = Some(FittedState::F32(KMeansState { centroids: arr.as_array().to_owned(), labels, inertia, n_iter }));
+                } else {
+                    let arr = state.get_item("centroids")?.unwrap().extract::<PyReadonlyArray2<'_, f64>>()?;
+                    self.fitted = Some(FittedState::F64(KMeansState { centroids: arr.as_array().to_owned(), labels, inertia, n_iter }));
+                }
+            }
+            Ok(())
+        }
+
+        fn __getnewargs__(&self) -> (usize,) { (self.n_clusters,) }
+    }
+
+    fn metric_str(m: Metric) -> &'static str {
+        match m { Metric::Euclidean => "euclidean", Metric::Cosine => "cosine", Metric::Manhattan => "manhattan" }
     }
 
     // ---- DBSCAN ----
@@ -438,6 +503,58 @@ mod python_bindings {
                 self.eps, self.min_samples, met_str
             )
         }
+
+        fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("eps", self.eps)?;
+            dict.set_item("min_samples", self.min_samples)?;
+            dict.set_item("metric", metric_str(self.metric))?;
+            match &self.fitted {
+                None => { dict.set_item("fitted", false)?; }
+                Some(DbscanFitted::F64(s)) => {
+                    dict.set_item("fitted", true)?;
+                    dict.set_item("dtype", "float64")?;
+                    dict.set_item("labels", s.labels.clone())?;
+                    dict.set_item("core_sample_indices", s.core_sample_indices.iter().map(|&i| i as i64).collect::<Vec<_>>())?;
+                    dict.set_item("components", PyArray2::from_owned_array(py, s.components.clone()))?;
+                    dict.set_item("n_clusters", s.n_clusters)?;
+                }
+                Some(DbscanFitted::F32(s)) => {
+                    dict.set_item("fitted", true)?;
+                    dict.set_item("dtype", "float32")?;
+                    dict.set_item("labels", s.labels.clone())?;
+                    dict.set_item("core_sample_indices", s.core_sample_indices.iter().map(|&i| i as i64).collect::<Vec<_>>())?;
+                    dict.set_item("components", PyArray2::from_owned_array(py, s.components.clone()))?;
+                    dict.set_item("n_clusters", s.n_clusters)?;
+                }
+            }
+            Ok(dict.into())
+        }
+
+        fn __setstate__(&mut self, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+            self.eps = state.get_item("eps")?.unwrap().extract()?;
+            self.min_samples = state.get_item("min_samples")?.unwrap().extract()?;
+            let met_s: String = state.get_item("metric")?.unwrap().extract()?;
+            self.metric = Metric::from_str(&met_s)?;
+            let is_fitted: bool = state.get_item("fitted")?.unwrap().extract()?;
+            if is_fitted {
+                let dtype: String = state.get_item("dtype")?.unwrap().extract()?;
+                let labels: Vec<i64> = state.get_item("labels")?.unwrap().extract()?;
+                let csi: Vec<i64> = state.get_item("core_sample_indices")?.unwrap().extract()?;
+                let core_sample_indices: Vec<usize> = csi.iter().map(|&i| i as usize).collect();
+                let n_clusters: usize = state.get_item("n_clusters")?.unwrap().extract()?;
+                if dtype == "float32" {
+                    let arr = state.get_item("components")?.unwrap().extract::<PyReadonlyArray2<'_, f32>>()?;
+                    self.fitted = Some(DbscanFitted::F32(DbscanState { labels, core_sample_indices, components: arr.as_array().to_owned(), n_clusters }));
+                } else {
+                    let arr = state.get_item("components")?.unwrap().extract::<PyReadonlyArray2<'_, f64>>()?;
+                    self.fitted = Some(DbscanFitted::F64(DbscanState { labels, core_sample_indices, components: arr.as_array().to_owned(), n_clusters }));
+                }
+            }
+            Ok(())
+        }
+
+        fn __getnewargs__(&self) -> (f64, usize, &str) { (self.eps, self.min_samples, metric_str(self.metric)) }
     }
 
     // ---- HDBSCAN ----
@@ -554,6 +671,49 @@ mod python_bindings {
                 self.min_cluster_size, self.min_samples, met_str, sel_str
             )
         }
+
+        fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("min_cluster_size", self.min_cluster_size)?;
+            dict.set_item("min_samples", self.min_samples)?;
+            dict.set_item("metric", metric_str(self.metric))?;
+            dict.set_item("cluster_selection_method", match self.cluster_selection_method { ClusterSelectionMethod::Eom => "eom", ClusterSelectionMethod::Leaf => "leaf" })?;
+            if let Some(ref f) = self.fitted {
+                dict.set_item("fitted", true)?;
+                let (labels, probs, pers, nc) = match f {
+                    HdbscanFitted::F64(s) => (s.labels.clone(), s.probabilities.clone(), s.cluster_persistence.clone(), s.n_clusters),
+                    HdbscanFitted::F32(s) => (s.labels.clone(), s.probabilities.clone(), s.cluster_persistence.clone(), s.n_clusters),
+                };
+                dict.set_item("labels", labels)?;
+                dict.set_item("probabilities", probs)?;
+                dict.set_item("cluster_persistence", pers)?;
+                dict.set_item("n_clusters", nc)?;
+            } else {
+                dict.set_item("fitted", false)?;
+            }
+            Ok(dict.into())
+        }
+
+        fn __setstate__(&mut self, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+            self.min_cluster_size = state.get_item("min_cluster_size")?.unwrap().extract()?;
+            self.min_samples = state.get_item("min_samples")?.unwrap().extract()?;
+            let met_s: String = state.get_item("metric")?.unwrap().extract()?;
+            self.metric = Metric::from_str(&met_s)?;
+            let sel_s: String = state.get_item("cluster_selection_method")?.unwrap().extract()?;
+            self.cluster_selection_method = ClusterSelectionMethod::from_str(&sel_s)?;
+            let is_fitted: bool = state.get_item("fitted")?.unwrap().extract()?;
+            if is_fitted {
+                let labels: Vec<i64> = state.get_item("labels")?.unwrap().extract()?;
+                let probabilities: Vec<f64> = state.get_item("probabilities")?.unwrap().extract()?;
+                let cluster_persistence: Vec<f64> = state.get_item("cluster_persistence")?.unwrap().extract()?;
+                let n_clusters: usize = state.get_item("n_clusters")?.unwrap().extract()?;
+                // HDBSCAN state is dtype-independent (all f64), use F64 variant
+                self.fitted = Some(HdbscanFitted::F64(HdbscanState { labels, probabilities, cluster_persistence, n_clusters, _phantom: std::marker::PhantomData }));
+            }
+            Ok(())
+        }
+
+        fn __getnewargs__(&self) -> (usize,) { (self.min_cluster_size,) }
     }
 
     // ---- Agglomerative ----
@@ -665,6 +825,47 @@ mod python_bindings {
             let met_str = match self.metric { Metric::Euclidean => "euclidean", Metric::Cosine => "cosine", Metric::Manhattan => "manhattan" };
             format!("AgglomerativeClustering(n_clusters={}, linkage=\"{}\", metric=\"{}\")", self.n_clusters, link_str, met_str)
         }
+
+        fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("n_clusters", self.n_clusters)?;
+            dict.set_item("linkage", match self.linkage { Linkage::Ward => "ward", Linkage::Complete => "complete", Linkage::Average => "average", Linkage::Single => "single" })?;
+            dict.set_item("metric", metric_str(self.metric))?;
+            if let Some(ref f) = self.fitted {
+                dict.set_item("fitted", true)?;
+                let (labels, children, distances, nc) = match f {
+                    AgglomerativeFitted::F64(s) => (s.labels.clone(), s.children.clone(), s.distances.clone(), s.n_clusters),
+                    AgglomerativeFitted::F32(s) => (s.labels.clone(), s.children.clone(), s.distances.clone(), s.n_clusters),
+                };
+                dict.set_item("labels", labels)?;
+                dict.set_item("children", children.iter().map(|&(a, b)| vec![a as i64, b as i64]).collect::<Vec<_>>())?;
+                dict.set_item("distances", distances)?;
+                dict.set_item("result_n_clusters", nc)?;
+            } else {
+                dict.set_item("fitted", false)?;
+            }
+            Ok(dict.into())
+        }
+
+        fn __setstate__(&mut self, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+            self.n_clusters = state.get_item("n_clusters")?.unwrap().extract()?;
+            let link_s: String = state.get_item("linkage")?.unwrap().extract()?;
+            self.linkage = Linkage::from_str(&link_s)?;
+            let met_s: String = state.get_item("metric")?.unwrap().extract()?;
+            self.metric = Metric::from_str(&met_s)?;
+            let is_fitted: bool = state.get_item("fitted")?.unwrap().extract()?;
+            if is_fitted {
+                let labels: Vec<i64> = state.get_item("labels")?.unwrap().extract()?;
+                let children_raw: Vec<Vec<i64>> = state.get_item("children")?.unwrap().extract()?;
+                let children: Vec<(usize, usize)> = children_raw.iter().map(|v| (v[0] as usize, v[1] as usize)).collect();
+                let distances: Vec<f64> = state.get_item("distances")?.unwrap().extract()?;
+                let nc: usize = state.get_item("result_n_clusters")?.unwrap().extract()?;
+                self.fitted = Some(AgglomerativeFitted::F64(AgglomerativeState { labels, children, distances, n_clusters: nc, _phantom: std::marker::PhantomData }));
+            }
+            Ok(())
+        }
+
+        fn __getnewargs__(&self) -> (usize,) { (self.n_clusters,) }
     }
 
     // ---- Mini-batch K-means ----
@@ -861,6 +1062,66 @@ mod python_bindings {
                 self.n_clusters, self.batch_size, self.max_iter, self.tol, self.random_state, self.max_no_improvement, met_str
             )
         }
+
+        fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("n_clusters", self.n_clusters)?;
+            dict.set_item("batch_size", self.batch_size)?;
+            dict.set_item("max_iter", self.max_iter)?;
+            dict.set_item("tol", self.tol)?;
+            dict.set_item("random_state", self.random_state)?;
+            dict.set_item("max_no_improvement", self.max_no_improvement)?;
+            dict.set_item("metric", metric_str(self.metric))?;
+            match &self.fitted {
+                None => { dict.set_item("fitted", false)?; }
+                Some(MiniBatchFittedState::F64(s)) => {
+                    dict.set_item("fitted", true)?;
+                    dict.set_item("dtype", "float64")?;
+                    dict.set_item("centroids", PyArray2::from_owned_array(py, s.centroids.clone()))?;
+                    dict.set_item("labels", s.labels.iter().map(|&l| l as i64).collect::<Vec<_>>())?;
+                    dict.set_item("inertia", s.inertia)?;
+                    dict.set_item("n_iter", s.n_iter)?;
+                }
+                Some(MiniBatchFittedState::F32(s)) => {
+                    dict.set_item("fitted", true)?;
+                    dict.set_item("dtype", "float32")?;
+                    dict.set_item("centroids", PyArray2::from_owned_array(py, s.centroids.clone()))?;
+                    dict.set_item("labels", s.labels.iter().map(|&l| l as i64).collect::<Vec<_>>())?;
+                    dict.set_item("inertia", s.inertia)?;
+                    dict.set_item("n_iter", s.n_iter)?;
+                }
+            }
+            Ok(dict.into())
+        }
+
+        fn __setstate__(&mut self, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+            self.n_clusters = state.get_item("n_clusters")?.unwrap().extract()?;
+            self.batch_size = state.get_item("batch_size")?.unwrap().extract()?;
+            self.max_iter = state.get_item("max_iter")?.unwrap().extract()?;
+            self.tol = state.get_item("tol")?.unwrap().extract()?;
+            self.random_state = state.get_item("random_state")?.unwrap().extract()?;
+            self.max_no_improvement = state.get_item("max_no_improvement")?.unwrap().extract()?;
+            let met_s: String = state.get_item("metric")?.unwrap().extract()?;
+            self.metric = Metric::from_str(&met_s)?;
+            let is_fitted: bool = state.get_item("fitted")?.unwrap().extract()?;
+            if is_fitted {
+                let dtype: String = state.get_item("dtype")?.unwrap().extract()?;
+                let labels_i64: Vec<i64> = state.get_item("labels")?.unwrap().extract()?;
+                let labels: Vec<usize> = labels_i64.iter().map(|&l| l as usize).collect();
+                let inertia: f64 = state.get_item("inertia")?.unwrap().extract()?;
+                let n_iter: usize = state.get_item("n_iter")?.unwrap().extract()?;
+                if dtype == "float32" {
+                    let arr = state.get_item("centroids")?.unwrap().extract::<PyReadonlyArray2<'_, f32>>()?;
+                    self.fitted = Some(MiniBatchFittedState::F32(MiniBatchKMeansState { centroids: arr.as_array().to_owned(), labels, inertia, n_iter }));
+                } else {
+                    let arr = state.get_item("centroids")?.unwrap().extract::<PyReadonlyArray2<'_, f64>>()?;
+                    self.fitted = Some(MiniBatchFittedState::F64(MiniBatchKMeansState { centroids: arr.as_array().to_owned(), labels, inertia, n_iter }));
+                }
+            }
+            Ok(())
+        }
+
+        fn __getnewargs__(&self) -> (usize,) { (self.n_clusters,) }
     }
 
     // ---- Metrics ----

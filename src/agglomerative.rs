@@ -19,7 +19,7 @@ pub struct AgglomerativeState<F: Scalar> {
     pub n_clusters: usize,
     pub children: Vec<(usize, usize)>,   // merge history: (n-1) entries
     pub distances: Vec<f64>,             // distance at each merge
-    _phantom: std::marker::PhantomData<F>,
+    pub _phantom: std::marker::PhantomData<F>,
 }
 
 /// Linkage method.

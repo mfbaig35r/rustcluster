@@ -28,7 +28,7 @@ pub struct HdbscanState<F: Scalar> {
     pub probabilities: Vec<f64>,
     pub cluster_persistence: Vec<f64>,
     pub n_clusters: usize,
-    _phantom: std::marker::PhantomData<F>,
+    pub _phantom: std::marker::PhantomData<F>,
 }
 
 /// Cluster selection method.
