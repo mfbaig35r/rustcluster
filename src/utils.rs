@@ -2,7 +2,7 @@ use ndarray::ArrayView2;
 use num_traits::Float;
 
 use crate::distance::{Distance, Scalar};
-use crate::error::KMeansError;
+use crate::error::ClusterError;
 
 // ---- Generic kernels (Layer 3) ----
 
@@ -80,20 +80,20 @@ pub fn assign_nearest_two_with<F: Scalar, D: Distance<F>>(
 // ---- Validation (generic over Scalar) ----
 
 /// Validate that input data is non-empty and contains only finite values.
-pub fn validate_data_generic<F: Scalar>(data: &ArrayView2<F>) -> Result<(), KMeansError> {
+pub fn validate_data_generic<F: Scalar>(data: &ArrayView2<F>) -> Result<(), ClusterError> {
     let (n, d) = data.dim();
     if n == 0 || d == 0 {
-        return Err(KMeansError::EmptyInput);
+        return Err(ClusterError::EmptyInput);
     }
 
     if let Some(slice) = data.as_slice() {
         if slice.iter().any(|v| !v.is_finite()) {
-            return Err(KMeansError::NonFinite);
+            return Err(ClusterError::NonFinite);
         }
     } else {
         for row in data.rows() {
             if row.iter().any(|v| !v.is_finite()) {
-                return Err(KMeansError::NonFinite);
+                return Err(ClusterError::NonFinite);
             }
         }
     }
@@ -105,13 +105,13 @@ pub fn validate_data_generic<F: Scalar>(data: &ArrayView2<F>) -> Result<(), KMea
 pub fn validate_predict_data_generic<F: Scalar>(
     data: &ArrayView2<F>,
     expected_d: usize,
-) -> Result<(), KMeansError> {
+) -> Result<(), ClusterError> {
     let (n, d) = data.dim();
     if n == 0 || d == 0 {
-        return Err(KMeansError::EmptyInput);
+        return Err(ClusterError::EmptyInput);
     }
     if d != expected_d {
-        return Err(KMeansError::DimensionMismatch {
+        return Err(ClusterError::DimensionMismatch {
             expected: expected_d,
             got: d,
         });
@@ -147,7 +147,7 @@ pub fn assign_nearest_two(
 }
 
 /// Validate f64 data.
-pub fn validate_data(data: &ArrayView2<f64>) -> Result<(), KMeansError> {
+pub fn validate_data(data: &ArrayView2<f64>) -> Result<(), ClusterError> {
     validate_data_generic(data)
 }
 
@@ -155,7 +155,7 @@ pub fn validate_data(data: &ArrayView2<f64>) -> Result<(), KMeansError> {
 pub fn validate_predict_data(
     data: &ArrayView2<f64>,
     expected_d: usize,
-) -> Result<(), KMeansError> {
+) -> Result<(), ClusterError> {
     validate_predict_data_generic(data, expected_d)
 }
 
@@ -242,19 +242,19 @@ mod tests {
     #[test]
     fn test_validate_data_empty() {
         let data = ndarray::Array2::<f64>::zeros((0, 2));
-        assert!(matches!(validate_data(&data.view()), Err(KMeansError::EmptyInput)));
+        assert!(matches!(validate_data(&data.view()), Err(ClusterError::EmptyInput)));
     }
 
     #[test]
     fn test_validate_data_nan() {
         let data = array![[1.0, f64::NAN], [3.0, 4.0]];
-        assert!(matches!(validate_data(&data.view()), Err(KMeansError::NonFinite)));
+        assert!(matches!(validate_data(&data.view()), Err(ClusterError::NonFinite)));
     }
 
     #[test]
     fn test_validate_data_inf() {
         let data = array![[1.0, f64::INFINITY], [3.0, 4.0]];
-        assert!(matches!(validate_data(&data.view()), Err(KMeansError::NonFinite)));
+        assert!(matches!(validate_data(&data.view()), Err(ClusterError::NonFinite)));
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
         let data = array![[1.0, 2.0, 3.0]];
         assert!(matches!(
             validate_predict_data(&data.view(), 2),
-            Err(KMeansError::DimensionMismatch { expected: 2, got: 3 })
+            Err(ClusterError::DimensionMismatch { expected: 2, got: 3 })
         ));
     }
 
@@ -272,6 +272,6 @@ mod tests {
         assert!(validate_data_generic(&data.view()).is_ok());
 
         let bad = ndarray::array![[1.0f32, f32::NAN]];
-        assert!(matches!(validate_data_generic(&bad.view()), Err(KMeansError::NonFinite)));
+        assert!(matches!(validate_data_generic(&bad.view()), Err(ClusterError::NonFinite)));
     }
 }

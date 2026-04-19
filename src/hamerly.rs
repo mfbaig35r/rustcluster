@@ -15,7 +15,7 @@ use rand::Rng;
 use rayon::prelude::*;
 
 use crate::distance::{Distance, Scalar};
-use crate::error::KMeansError;
+use crate::error::ClusterError;
 use crate::kmeans::{compute_centroid_shifts, recompute_centroids, KMeansState};
 use crate::utils::assign_nearest_two_with;
 
@@ -33,7 +33,7 @@ pub fn run_hamerly_iterations<F: Scalar, D: Distance<F>>(
     max_iter: usize,
     tol: f64,
     rng: &mut StdRng,
-) -> Result<KMeansState<F>, KMeansError> {
+) -> Result<KMeansState<F>, ClusterError> {
     debug_assert!(k >= 2, "Hamerly requires k >= 2");
 
     let mut labels = vec![0usize; n];

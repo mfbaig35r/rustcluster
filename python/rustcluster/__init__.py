@@ -3,8 +3,19 @@
 import numpy as np
 
 from rustcluster._rustcluster import KMeans as _RustKMeans
+from rustcluster._rustcluster import Dbscan as _RustDbscan
 
-__all__ = ["KMeans"]
+__all__ = ["KMeans", "DBSCAN"]
+
+
+def _prepare_array(X):
+    """Ensure input is a 2D C-contiguous float32 or float64 array."""
+    X = np.asarray(X)
+    if X.ndim != 2:
+        raise ValueError(f"Expected 2D array, got {X.ndim}D")
+    if X.dtype == np.float32:
+        return np.ascontiguousarray(X, dtype=np.float32)
+    return np.ascontiguousarray(X, dtype=np.float64)
 
 
 class KMeans:
@@ -43,15 +54,6 @@ class KMeans:
         self._n_init = n_init
         self._algorithm = algorithm
 
-    def _prepare(self, X):
-        """Ensure input is C-contiguous float32 or float64."""
-        X = np.asarray(X)
-        if X.ndim != 2:
-            raise ValueError(f"Expected 2D array, got {X.ndim}D")
-        if X.dtype == np.float32:
-            return np.ascontiguousarray(X, dtype=np.float32)
-        return np.ascontiguousarray(X, dtype=np.float64)
-
     def fit(self, X):
         """Fit the K-means model to data.
 
@@ -63,7 +65,7 @@ class KMeans:
         -------
         self
         """
-        X = self._prepare(X)
+        X = _prepare_array(X)
         self._model.fit(X)
         return self
 
@@ -78,7 +80,7 @@ class KMeans:
         -------
         labels : ndarray of shape (n_samples,)
         """
-        X = self._prepare(X)
+        X = _prepare_array(X)
         return self._model.predict(X)
 
     def fit_predict(self, X):
@@ -92,7 +94,7 @@ class KMeans:
         -------
         labels : ndarray of shape (n_samples,)
         """
-        X = self._prepare(X)
+        X = _prepare_array(X)
         return self._model.fit_predict(X)
 
     @property
@@ -120,4 +122,74 @@ class KMeans:
             f"KMeans(n_clusters={self._n_clusters}, max_iter={self._max_iter}, "
             f"tol={self._tol}, random_state={self._random_state}, "
             f"n_init={self._n_init}, algorithm=\"{self._algorithm}\")"
+        )
+
+
+class DBSCAN:
+    """DBSCAN clustering backed by a Rust implementation.
+
+    Parameters
+    ----------
+    eps : float, default=0.5
+        Maximum distance between two samples to be considered neighbors.
+    min_samples : int, default=5
+        Minimum number of points required to form a core point.
+    metric : str, default="euclidean"
+        Distance metric. Only "euclidean" is supported.
+    """
+
+    def __init__(self, eps=0.5, min_samples=5, metric="euclidean"):
+        self._model = _RustDbscan(eps=eps, min_samples=min_samples, metric=metric)
+        self._eps = eps
+        self._min_samples = min_samples
+        self._metric = metric
+
+    def fit(self, X):
+        """Fit the DBSCAN model to data.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        self
+        """
+        X = _prepare_array(X)
+        self._model.fit(X)
+        return self
+
+    def fit_predict(self, X):
+        """Fit the model and return cluster labels.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,), -1 for noise
+        """
+        X = _prepare_array(X)
+        return self._model.fit_predict(X)
+
+    @property
+    def labels_(self):
+        """Cluster labels for the training data. -1 indicates noise."""
+        return self._model.labels_
+
+    @property
+    def core_sample_indices_(self):
+        """Indices of core samples."""
+        return self._model.core_sample_indices_
+
+    @property
+    def components_(self):
+        """Core sample coordinates, shape (n_core_samples, n_features)."""
+        return self._model.components_
+
+    def __repr__(self):
+        return (
+            f"DBSCAN(eps={self._eps}, min_samples={self._min_samples}, "
+            f"metric=\"{self._metric}\")"
         )

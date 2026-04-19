@@ -6,7 +6,7 @@ use rand_distr::Distribution;
 use rayon::prelude::*;
 
 use crate::distance::{Distance, Scalar, SquaredEuclidean};
-use crate::error::KMeansError;
+use crate::error::ClusterError;
 use crate::utils::{assign_nearest_with, validate_data_generic};
 
 /// Result of a fitted K-means model, generic over float type.
@@ -26,12 +26,12 @@ pub enum Algorithm {
 }
 
 impl Algorithm {
-    pub fn from_str(s: &str) -> Result<Self, KMeansError> {
+    pub fn from_str(s: &str) -> Result<Self, ClusterError> {
         match s.to_lowercase().as_str() {
             "auto" => Ok(Algorithm::Auto),
             "lloyd" => Ok(Algorithm::Lloyd),
             "hamerly" => Ok(Algorithm::Hamerly),
-            _ => Err(KMeansError::InvalidAlgorithm(s.to_string())),
+            _ => Err(ClusterError::InvalidAlgorithm(s.to_string())),
         }
     }
 
@@ -62,7 +62,7 @@ pub fn run_kmeans_n_init(
     seed: u64,
     n_init: usize,
     algo: Algorithm,
-) -> Result<KMeansState<f64>, KMeansError> {
+) -> Result<KMeansState<f64>, ClusterError> {
     run_kmeans_n_init_generic::<f64, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo)
 }
 
@@ -75,7 +75,7 @@ pub fn run_kmeans_n_init_f32(
     seed: u64,
     n_init: usize,
     algo: Algorithm,
-) -> Result<KMeansState<f32>, KMeansError> {
+) -> Result<KMeansState<f32>, ClusterError> {
     run_kmeans_n_init_generic::<f32, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo)
 }
 
@@ -90,7 +90,7 @@ pub fn run_kmeans_n_init_generic<F: Scalar, D: Distance<F>>(
     seed: u64,
     n_init: usize,
     algo: Algorithm,
-) -> Result<KMeansState<F>, KMeansError> {
+) -> Result<KMeansState<F>, ClusterError> {
     let mut best: Option<KMeansState<F>> = None;
 
     for i in 0..n_init {
@@ -117,12 +117,12 @@ fn run_kmeans_single<F: Scalar, D: Distance<F>>(
     tol: f64,
     seed: u64,
     algo: Algorithm,
-) -> Result<KMeansState<F>, KMeansError> {
+) -> Result<KMeansState<F>, ClusterError> {
     validate_data_generic(data)?;
 
     let (n, d) = data.dim();
     if k == 0 || k > n {
-        return Err(KMeansError::InvalidClusters { k, n });
+        return Err(ClusterError::InvalidClusters { k, n });
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
@@ -153,7 +153,7 @@ fn run_lloyd_iterations<F: Scalar, D: Distance<F>>(
     max_iter: usize,
     tol: f64,
     rng: &mut StdRng,
-) -> Result<KMeansState<F>, KMeansError> {
+) -> Result<KMeansState<F>, ClusterError> {
     let mut labels = vec![0usize; n];
     let mut inertia = f64::MAX;
     let mut n_iter = 0;
@@ -437,14 +437,14 @@ mod tests {
     fn test_k_greater_than_n_fails() {
         let data = array![[1.0, 2.0], [3.0, 4.0]];
         let result = run_kmeans_n_init(&data.view(), 5, 100, 1e-4, 42, 1, Algorithm::Lloyd);
-        assert!(matches!(result, Err(KMeansError::InvalidClusters { .. })));
+        assert!(matches!(result, Err(ClusterError::InvalidClusters { .. })));
     }
 
     #[test]
     fn test_empty_input_fails() {
         let data = Array2::<f64>::zeros((0, 2));
         let result = run_kmeans_n_init(&data.view(), 1, 100, 1e-4, 42, 1, Algorithm::Lloyd);
-        assert!(matches!(result, Err(KMeansError::EmptyInput)));
+        assert!(matches!(result, Err(ClusterError::EmptyInput)));
     }
 
     #[test]
