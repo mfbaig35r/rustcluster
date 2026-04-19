@@ -3,7 +3,9 @@
 import numpy as np
 
 from rustcluster._rustcluster import KMeans as _RustKMeans
+from rustcluster._rustcluster import MiniBatchKMeans as _RustMiniBatchKMeans
 from rustcluster._rustcluster import Dbscan as _RustDbscan
+from rustcluster._rustcluster import Hdbscan as _RustHdbscan
 from rustcluster._rustcluster import (
     silhouette_score as _silhouette_score,
     calinski_harabasz_score as _calinski_harabasz_score,
@@ -12,7 +14,9 @@ from rustcluster._rustcluster import (
 
 __all__ = [
     "KMeans",
+    "MiniBatchKMeans",
     "DBSCAN",
+    "HDBSCAN",
     "silhouette_score",
     "calinski_harabasz_score",
     "davies_bouldin_score",
@@ -142,6 +146,120 @@ class KMeans:
         )
 
 
+class MiniBatchKMeans:
+    """Mini-batch K-means clustering backed by a Rust implementation.
+
+    Processes random subsets of data per iteration for faster convergence
+    on large datasets, at the cost of slightly worse cluster quality.
+
+    Parameters
+    ----------
+    n_clusters : int
+        Number of clusters.
+    batch_size : int, default=1024
+        Number of samples per mini-batch.
+    max_iter : int, default=100
+        Maximum iterations.
+    tol : float, default=0.0
+        Early stopping tolerance on EWA inertia change. 0 disables.
+    random_state : int, default=0
+        Seed for reproducibility.
+    max_no_improvement : int, default=10
+        Stop after this many iterations with no improvement.
+    metric : str, default="euclidean"
+        Distance metric: "euclidean" or "cosine".
+    """
+
+    def __init__(self, n_clusters, batch_size=1024, max_iter=100, tol=0.0,
+                 random_state=0, max_no_improvement=10, metric="euclidean"):
+        self._model = _RustMiniBatchKMeans(
+            n_clusters=n_clusters,
+            batch_size=batch_size,
+            max_iter=max_iter,
+            tol=tol,
+            random_state=random_state,
+            max_no_improvement=max_no_improvement,
+            metric=metric,
+        )
+        self._n_clusters = n_clusters
+        self._batch_size = batch_size
+        self._max_iter = max_iter
+        self._tol = tol
+        self._random_state = random_state
+        self._max_no_improvement = max_no_improvement
+        self._metric = metric
+
+    def fit(self, X):
+        """Fit the model to data.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        self
+        """
+        X = _prepare_array(X)
+        self._model.fit(X)
+        return self
+
+    def predict(self, X):
+        """Predict cluster labels for new data.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,)
+        """
+        X = _prepare_array(X)
+        return self._model.predict(X)
+
+    def fit_predict(self, X):
+        """Fit the model and return cluster labels.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,)
+        """
+        X = _prepare_array(X)
+        return self._model.fit_predict(X)
+
+    @property
+    def labels_(self):
+        """Cluster labels for the training data."""
+        return self._model.labels_
+
+    @property
+    def cluster_centers_(self):
+        """Centroid coordinates, shape (n_clusters, n_features)."""
+        return self._model.cluster_centers_
+
+    @property
+    def inertia_(self):
+        """Sum of squared distances to nearest centroid."""
+        return self._model.inertia_
+
+    @property
+    def n_iter_(self):
+        """Number of iterations run."""
+        return self._model.n_iter_
+
+    def __repr__(self):
+        return (
+            f"MiniBatchKMeans(n_clusters={self._n_clusters}, batch_size={self._batch_size}, "
+            f"max_iter={self._max_iter}, tol={self._tol}, random_state={self._random_state}, "
+            f"max_no_improvement={self._max_no_improvement}, metric=\"{self._metric}\")"
+        )
+
+
 class DBSCAN:
     """DBSCAN clustering backed by a Rust implementation.
 
@@ -209,6 +327,93 @@ class DBSCAN:
         return (
             f"DBSCAN(eps={self._eps}, min_samples={self._min_samples}, "
             f"metric=\"{self._metric}\")"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Clustering metrics
+# ---------------------------------------------------------------------------
+
+class HDBSCAN:
+    """HDBSCAN clustering backed by a Rust implementation.
+
+    Hierarchical density-based clustering that automatically determines
+    the number of clusters and provides soft cluster membership probabilities.
+
+    Parameters
+    ----------
+    min_cluster_size : int, default=5
+        Minimum number of points to form a cluster.
+    min_samples : int or None, default=None
+        Core distance parameter. Defaults to min_cluster_size if None.
+    metric : str, default="euclidean"
+        Distance metric: "euclidean" or "cosine".
+    cluster_selection_method : str, default="eom"
+        Method for extracting flat clusters: "eom" (Excess of Mass) or "leaf".
+    """
+
+    def __init__(self, min_cluster_size=5, min_samples=None,
+                 metric="euclidean", cluster_selection_method="eom"):
+        self._model = _RustHdbscan(
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            metric=metric,
+            cluster_selection_method=cluster_selection_method,
+        )
+        self._min_cluster_size = min_cluster_size
+        self._min_samples = min_samples if min_samples is not None else min_cluster_size
+        self._metric = metric
+        self._cluster_selection_method = cluster_selection_method
+
+    def fit(self, X):
+        """Fit the HDBSCAN model to data.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        self
+        """
+        X = _prepare_array(X)
+        self._model.fit(X)
+        return self
+
+    def fit_predict(self, X):
+        """Fit the model and return cluster labels.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,), -1 for noise
+        """
+        X = _prepare_array(X)
+        return self._model.fit_predict(X)
+
+    @property
+    def labels_(self):
+        """Cluster labels. -1 indicates noise."""
+        return self._model.labels_
+
+    @property
+    def probabilities_(self):
+        """Soft cluster membership probabilities in [0, 1]."""
+        return self._model.probabilities_
+
+    @property
+    def cluster_persistence_(self):
+        """Per-cluster stability scores."""
+        return self._model.cluster_persistence_
+
+    def __repr__(self):
+        return (
+            f"HDBSCAN(min_cluster_size={self._min_cluster_size}, "
+            f"min_samples={self._min_samples}, metric=\"{self._metric}\", "
+            f"cluster_selection_method=\"{self._cluster_selection_method}\")"
         )
 
 

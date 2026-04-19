@@ -42,8 +42,22 @@ pub enum ClusterError {
     #[error("min_samples must be >= 1, got {0}")]
     InvalidMinSamples(usize),
 
-    #[error("Unknown metric '{0}' — only \"euclidean\" is supported")]
+    #[error("Unknown metric '{0}' — use \"euclidean\" or \"cosine\"")]
     InvalidMetric(String),
+
+    // ---- Mini-batch K-means ----
+    #[error("batch_size must be > 0, got {0}")]
+    InvalidBatchSize(usize),
+
+    #[error("max_no_improvement must be > 0, got {0}")]
+    InvalidMaxNoImprovement(usize),
+
+    // ---- HDBSCAN ----
+    #[error("min_cluster_size must be >= 2, got {0}")]
+    InvalidMinClusterSize(usize),
+
+    #[error("cluster_selection_method must be \"eom\" or \"leaf\", got \"{0}\"")]
+    InvalidClusterSelectionMethod(String),
 }
 
 #[cfg(feature = "python")]
