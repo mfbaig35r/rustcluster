@@ -1,4 +1,5 @@
 mod error;
+mod hamerly;
 mod kmeans;
 mod utils;
 
@@ -7,7 +8,7 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 
 use crate::error::KMeansError;
-use crate::kmeans::{run_kmeans_n_init, KMeansState};
+use crate::kmeans::{run_kmeans_n_init, Algorithm, KMeansState};
 use crate::utils::validate_predict_data;
 
 #[pyclass]
@@ -17,19 +18,21 @@ struct KMeans {
     tol: f64,
     random_state: u64,
     n_init: usize,
+    algorithm: Algorithm,
     fitted: Option<KMeansState>,
 }
 
 #[pymethods]
 impl KMeans {
     #[new]
-    #[pyo3(signature = (n_clusters, max_iter=300, tol=1e-4, random_state=0, n_init=10))]
+    #[pyo3(signature = (n_clusters, max_iter=300, tol=1e-4, random_state=0, n_init=10, algorithm="auto"))]
     fn new(
         n_clusters: usize,
         max_iter: usize,
         tol: f64,
         random_state: u64,
         n_init: usize,
+        algorithm: &str,
     ) -> PyResult<Self> {
         if n_clusters == 0 {
             return Err(KMeansError::InvalidClusters { k: 0, n: 0 }.into());
@@ -44,12 +47,15 @@ impl KMeans {
             return Err(KMeansError::InvalidTol(tol).into());
         }
 
+        let algo = Algorithm::from_str(algorithm)?;
+
         Ok(KMeans {
             n_clusters,
             max_iter,
             tol,
             random_state,
             n_init,
+            algorithm: algo,
             fitted: None,
         })
     }
@@ -66,9 +72,10 @@ impl KMeans {
         let tol = self.tol;
         let seed = self.random_state;
         let n_init = self.n_init;
+        let algo = self.algorithm;
 
         let state = py.allow_threads(move || {
-            run_kmeans_n_init(&view, k, max_iter, tol, seed, n_init)
+            run_kmeans_n_init(&view, k, max_iter, tol, seed, n_init, algo)
         })?;
 
         self.fitted = Some(state);
@@ -155,9 +162,14 @@ impl KMeans {
     }
 
     fn __repr__(&self) -> String {
+        let algo_str = match self.algorithm {
+            Algorithm::Auto => "auto",
+            Algorithm::Lloyd => "lloyd",
+            Algorithm::Hamerly => "hamerly",
+        };
         format!(
-            "KMeans(n_clusters={}, max_iter={}, tol={}, random_state={}, n_init={})",
-            self.n_clusters, self.max_iter, self.tol, self.random_state, self.n_init
+            "KMeans(n_clusters={}, max_iter={}, tol={}, random_state={}, n_init={}, algorithm=\"{}\")",
+            self.n_clusters, self.max_iter, self.tol, self.random_state, self.n_init, algo_str
         )
     }
 }

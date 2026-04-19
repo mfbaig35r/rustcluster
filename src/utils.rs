@@ -42,6 +42,41 @@ pub fn assign_nearest(point: &[f64], centroids: &[f64], k: usize, d: usize) -> (
     (best_idx, best_dist)
 }
 
+/// Find the nearest and second-nearest centroid for a single point.
+///
+/// `centroids` is a flat row-major buffer of shape (k, d).
+/// Returns (nearest_idx, nearest_dist, second_nearest_dist).
+/// Requires k >= 2.
+#[inline]
+pub fn assign_nearest_two(
+    point: &[f64],
+    centroids: &[f64],
+    k: usize,
+    d: usize,
+) -> (usize, f64, f64) {
+    debug_assert!(k >= 2);
+    debug_assert_eq!(centroids.len(), k * d);
+    debug_assert_eq!(point.len(), d);
+
+    let mut best_idx = 0;
+    let mut best_dist = f64::MAX;
+    let mut second_dist = f64::MAX;
+
+    for cluster in 0..k {
+        let centroid = &centroids[cluster * d..(cluster + 1) * d];
+        let dist = squared_euclidean(point, centroid);
+        if dist < best_dist {
+            second_dist = best_dist;
+            best_dist = dist;
+            best_idx = cluster;
+        } else if dist < second_dist {
+            second_dist = dist;
+        }
+    }
+
+    (best_idx, best_dist, second_dist)
+}
+
 /// Validate that input data is non-empty and contains only finite values.
 pub fn validate_data(data: &ArrayView2<f64>) -> Result<(), KMeansError> {
     let (n, d) = data.dim();
@@ -140,6 +175,32 @@ mod tests {
 
         let (idx, _) = assign_nearest(&[9.0, 1.0], &centroids, k, d);
         assert_eq!(idx, 2); // closest to (10,0)
+    }
+
+    #[test]
+    fn test_assign_nearest_two() {
+        // Three centroids: (0,0), (5,5), (10,0)
+        let centroids = [0.0, 0.0, 5.0, 5.0, 10.0, 0.0];
+        let k = 3;
+        let d = 2;
+
+        let (idx, best, second) = assign_nearest_two(&[1.0, 1.0], &centroids, k, d);
+        assert_eq!(idx, 0); // closest to (0,0)
+        assert!((best - 2.0).abs() < 1e-10); // dist to (0,0) = 1+1 = 2
+        assert!(second > best); // second-nearest is farther
+        // second should be dist to (5,5) = 16+16 = 32
+        assert!((second - 32.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_assign_nearest_two_symmetric() {
+        // Two centroids equidistant
+        let centroids = [0.0, 0.0, 10.0, 0.0];
+        let (idx, best, second) = assign_nearest_two(&[5.0, 0.0], &centroids, 2, 2);
+        // Both at distance 25
+        assert!((best - 25.0).abs() < 1e-10);
+        assert!((second - 25.0).abs() < 1e-10);
+        assert!(idx == 0 || idx == 1);
     }
 
     #[test]

@@ -274,3 +274,80 @@ class TestEdgeCases:
         model = KMeans(n_clusters=3, random_state=42, n_init=1)
         model.fit(X)
         assert model.cluster_centers_.shape == (3, 50)
+
+
+# ---------------------------------------------------------------------------
+# Algorithm selection (Hamerly)
+# ---------------------------------------------------------------------------
+
+class TestAlgorithm:
+    def test_lloyd_explicit(self, blob_data):
+        model = KMeans(n_clusters=2, random_state=42, algorithm="lloyd")
+        model.fit(blob_data)
+        assert len(model.labels_) == len(blob_data)
+        assert model.inertia_ >= 0
+
+    def test_hamerly_explicit(self, blob_data):
+        model = KMeans(n_clusters=2, random_state=42, algorithm="hamerly")
+        model.fit(blob_data)
+        assert len(model.labels_) == len(blob_data)
+        assert model.inertia_ >= 0
+
+    def test_auto_default(self, blob_data):
+        model = KMeans(n_clusters=2, random_state=42)
+        model.fit(blob_data)
+        assert len(model.labels_) == len(blob_data)
+
+    def test_hamerly_matches_lloyd(self, blob_data):
+        """Both algorithms should produce the same partitioning on well-separated data."""
+        m_lloyd = KMeans(n_clusters=2, random_state=42, n_init=1, algorithm="lloyd")
+        m_lloyd.fit(blob_data)
+
+        m_hamerly = KMeans(n_clusters=2, random_state=42, n_init=1, algorithm="hamerly")
+        m_hamerly.fit(blob_data)
+
+        np.testing.assert_array_equal(m_lloyd.labels_, m_hamerly.labels_)
+        assert abs(m_lloyd.inertia_ - m_hamerly.inertia_) < 1e-4
+
+    def test_invalid_algorithm_raises(self):
+        with pytest.raises(ValueError, match="Unknown algorithm"):
+            KMeans(n_clusters=2, algorithm="bogus")
+
+    def test_hamerly_high_d_high_k(self):
+        """Hamerly works on larger configurations."""
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((500, 32))
+        model = KMeans(n_clusters=16, random_state=42, n_init=1, algorithm="hamerly")
+        model.fit(X)
+        assert model.cluster_centers_.shape == (16, 32)
+        assert model.inertia_ >= 0
+
+    def test_hamerly_single_cluster_falls_back(self):
+        """k=1 with hamerly should fall back to lloyd (needs k>=2)."""
+        X = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        model = KMeans(n_clusters=1, random_state=42, algorithm="hamerly")
+        model.fit(X)
+        assert all(l == 0 for l in model.labels_)
+
+    def test_hamerly_predict(self, blob_data):
+        model = KMeans(n_clusters=2, random_state=42, algorithm="hamerly")
+        model.fit(blob_data)
+        preds = model.predict(blob_data)
+        np.testing.assert_array_equal(preds, model.labels_)
+
+    def test_hamerly_fit_predict(self, blob_data):
+        model = KMeans(n_clusters=2, random_state=42, algorithm="hamerly")
+        labels = model.fit_predict(blob_data)
+        np.testing.assert_array_equal(labels, model.labels_)
+
+    def test_hamerly_reproducibility(self, blob_data):
+        m1 = KMeans(n_clusters=2, random_state=42, algorithm="hamerly")
+        m1.fit(blob_data)
+        m2 = KMeans(n_clusters=2, random_state=42, algorithm="hamerly")
+        m2.fit(blob_data)
+        np.testing.assert_array_equal(m1.labels_, m2.labels_)
+        assert abs(m1.inertia_ - m2.inertia_) < 1e-10
+
+    def test_algorithm_in_repr(self):
+        model = KMeans(n_clusters=2, algorithm="hamerly")
+        assert 'algorithm="hamerly"' in repr(model)

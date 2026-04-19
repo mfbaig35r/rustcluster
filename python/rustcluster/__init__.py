@@ -22,21 +22,26 @@ class KMeans:
         Seed for reproducibility.
     n_init : int, default=10
         Number of initializations; the run with lowest inertia wins.
+    algorithm : str, default="auto"
+        Algorithm to use: "auto", "lloyd", or "hamerly".
+        "auto" selects based on data dimensions and cluster count.
     """
 
-    def __init__(self, n_clusters, max_iter=300, tol=1e-4, random_state=0, n_init=10):
+    def __init__(self, n_clusters, max_iter=300, tol=1e-4, random_state=0, n_init=10, algorithm="auto"):
         self._model = _RustKMeans(
             n_clusters=n_clusters,
             max_iter=max_iter,
             tol=tol,
             random_state=random_state,
             n_init=n_init,
+            algorithm=algorithm,
         )
         self._n_clusters = n_clusters
         self._max_iter = max_iter
         self._tol = tol
         self._random_state = random_state
         self._n_init = n_init
+        self._algorithm = algorithm
 
     def _prepare(self, X):
         """Ensure input is C-contiguous float64."""
@@ -111,5 +116,6 @@ class KMeans:
     def __repr__(self):
         return (
             f"KMeans(n_clusters={self._n_clusters}, max_iter={self._max_iter}, "
-            f"tol={self._tol}, random_state={self._random_state}, n_init={self._n_init})"
+            f"tol={self._tol}, random_state={self._random_state}, "
+            f"n_init={self._n_init}, algorithm=\"{self._algorithm}\")"
         )

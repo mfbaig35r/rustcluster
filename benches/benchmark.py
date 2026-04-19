@@ -39,36 +39,19 @@ def make_blobs(n_samples, n_features, n_clusters, seed=0):
     return np.ascontiguousarray(X, dtype=np.float64)
 
 
-def benchmark_one(X, n_clusters, n_runs=5):
-    """Benchmark a single configuration. Returns (rust_time, sklearn_time) in seconds."""
-    # Warmup
-    RustKMeans(n_clusters=n_clusters, n_init=1, random_state=0, max_iter=100).fit(X)
+def time_fit(make_model, X, n_runs=5):
+    """Time a model fit, return median of n_runs after warmup.
 
-    # Rust benchmark
-    rust_times = []
+    Uses a different random_state per run to avoid measuring a single
+    lucky/unlucky initialization. make_model receives the run index.
+    """
+    make_model(0).fit(X)  # warmup
+    times = []
     for r in range(n_runs):
         t0 = time.perf_counter()
-        RustKMeans(n_clusters=n_clusters, n_init=1, random_state=r, max_iter=100).fit(X)
-        rust_times.append(time.perf_counter() - t0)
-    rust_median = sorted(rust_times)[n_runs // 2]
-
-    sklearn_median = None
-    if HAS_SKLEARN:
-        # Warmup
-        SklearnKMeans(
-            n_clusters=n_clusters, n_init=1, random_state=0, max_iter=100, algorithm="lloyd"
-        ).fit(X)
-
-        sklearn_times = []
-        for r in range(n_runs):
-            t0 = time.perf_counter()
-            SklearnKMeans(
-                n_clusters=n_clusters, n_init=1, random_state=r, max_iter=100, algorithm="lloyd"
-            ).fit(X)
-            sklearn_times.append(time.perf_counter() - t0)
-        sklearn_median = sorted(sklearn_times)[n_runs // 2]
-
-    return rust_median, sklearn_median
+        make_model(r).fit(X)
+        times.append(time.perf_counter() - t0)
+    return sorted(times)[n_runs // 2]
 
 
 def main():
@@ -88,32 +71,53 @@ def main():
         (100_000, 32, 32),
     ]
 
-    print("rustcluster vs scikit-learn KMeans Benchmark")
-    print("=" * 75)
-    print(f"{'n':>10} {'d':>5} {'k':>5} {'rust (ms)':>12} {'sklearn (ms)':>14} {'speedup':>10}")
-    print("-" * 75)
+    header = f"{'n':>10} {'d':>5} {'k':>5} {'lloyd (ms)':>12} {'hamerly (ms)':>14} {'sklearn (ms)':>14} {'lloyd sp':>10} {'ham sp':>10}"
+
+    print("rustcluster (Lloyd + Hamerly) vs scikit-learn KMeans Benchmark")
+    print("=" * len(header))
+    print(header)
+    print("-" * len(header))
 
     for n_samples, n_features, n_clusters in configs:
         X = make_blobs(n_samples, n_features, n_clusters)
-        rust_t, sklearn_t = benchmark_one(X, n_clusters)
 
-        rust_ms = rust_t * 1000
-        if sklearn_t is not None:
+        lloyd_t = time_fit(
+            lambda r: RustKMeans(n_clusters=n_clusters, n_init=1, random_state=r, max_iter=100, algorithm="lloyd"),
+            X,
+        )
+        hamerly_t = time_fit(
+            lambda r: RustKMeans(n_clusters=n_clusters, n_init=1, random_state=r, max_iter=100, algorithm="hamerly"),
+            X,
+        )
+
+        lloyd_ms = lloyd_t * 1000
+        hamerly_ms = hamerly_t * 1000
+
+        if HAS_SKLEARN:
+            sklearn_t = time_fit(
+                lambda r: SklearnKMeans(n_clusters=n_clusters, n_init=1, random_state=r, max_iter=100, algorithm="lloyd"),
+                X,
+            )
             sklearn_ms = sklearn_t * 1000
-            speedup = sklearn_t / rust_t if rust_t > 0 else float("inf")
+            lloyd_sp = sklearn_t / lloyd_t if lloyd_t > 0 else float("inf")
+            hamerly_sp = sklearn_t / hamerly_t if hamerly_t > 0 else float("inf")
             print(
                 f"{n_samples:>10,} {n_features:>5} {n_clusters:>5} "
-                f"{rust_ms:>12.2f} {sklearn_ms:>14.2f} {speedup:>9.2f}x"
+                f"{lloyd_ms:>12.2f} {hamerly_ms:>14.2f} {sklearn_ms:>14.2f} "
+                f"{lloyd_sp:>9.2f}x {hamerly_sp:>9.2f}x"
             )
         else:
-            print(f"{n_samples:>10,} {n_features:>5} {n_clusters:>5} {rust_ms:>12.2f} {'N/A':>14} {'N/A':>10}")
+            print(
+                f"{n_samples:>10,} {n_features:>5} {n_clusters:>5} "
+                f"{lloyd_ms:>12.2f} {hamerly_ms:>14.2f} {'N/A':>14} {'N/A':>10} {'N/A':>10}"
+            )
 
-    print("-" * 75)
+    print("-" * len(header))
     print("\nNotes:")
     print("  - Single-threaded comparison (OMP/MKL/RAYON_NUM_THREADS=1)")
-    print("  - n_init=1, max_iter=100, algorithm=lloyd")
+    print("  - n_init=1, max_iter=100")
     print("  - Median of 5 runs after warmup")
-    print("  - speedup = sklearn_time / rust_time")
+    print("  - lloyd sp / ham sp = sklearn_time / rust_time")
 
 
 if __name__ == "__main__":

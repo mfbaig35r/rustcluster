@@ -32,6 +32,9 @@ pub enum KMeansError {
 
     #[error("Feature dimension mismatch: model expects {expected} features, got {got}")]
     DimensionMismatch { expected: usize, got: usize },
+
+    #[error("Unknown algorithm '{0}' — use \"auto\", \"lloyd\", or \"hamerly\"")]
+    InvalidAlgorithm(String),
 }
 
 impl From<KMeansError> for PyErr {
