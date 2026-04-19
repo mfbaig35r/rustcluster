@@ -30,14 +30,10 @@ jobs:
           path: dist/
 
   build-macos:
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     strategy:
       matrix:
-        include:
-          - os: macos-13
-            target: x86_64
-          - os: macos-latest
-            target: aarch64
+        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
