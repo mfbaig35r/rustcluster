@@ -3,6 +3,7 @@ pub mod distance;
 mod error;
 mod hamerly;
 pub mod kmeans;
+pub mod metrics;
 pub mod utils;
 
 /// Re-exports for Criterion benchmarks.
@@ -422,10 +423,84 @@ mod python_bindings {
         }
     }
 
+    // ---- Metrics ----
+
+    #[pyfunction]
+    fn silhouette_score(
+        py: Python<'_>,
+        x: &Bound<'_, pyo3::types::PyAny>,
+        labels: Vec<i64>,
+    ) -> PyResult<f64> {
+        if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
+            let view = arr.as_array();
+            return py
+                .allow_threads(move || crate::metrics::silhouette_score(&view, &labels))
+                .map_err(|e| pyo3::PyErr::from(e));
+        }
+        if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+            let view = arr.as_array();
+            return py
+                .allow_threads(move || crate::metrics::silhouette_score(&view, &labels))
+                .map_err(|e| pyo3::PyErr::from(e));
+        }
+        Err(pyo3::exceptions::PyValueError::new_err(
+            "Expected float32 or float64 array",
+        ))
+    }
+
+    #[pyfunction]
+    fn calinski_harabasz_score(
+        py: Python<'_>,
+        x: &Bound<'_, pyo3::types::PyAny>,
+        labels: Vec<i64>,
+    ) -> PyResult<f64> {
+        if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
+            let view = arr.as_array();
+            return py
+                .allow_threads(move || crate::metrics::calinski_harabasz_score(&view, &labels))
+                .map_err(|e| pyo3::PyErr::from(e));
+        }
+        if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+            let view = arr.as_array();
+            return py
+                .allow_threads(move || crate::metrics::calinski_harabasz_score(&view, &labels))
+                .map_err(|e| pyo3::PyErr::from(e));
+        }
+        Err(pyo3::exceptions::PyValueError::new_err(
+            "Expected float32 or float64 array",
+        ))
+    }
+
+    #[pyfunction]
+    fn davies_bouldin_score(
+        py: Python<'_>,
+        x: &Bound<'_, pyo3::types::PyAny>,
+        labels: Vec<i64>,
+    ) -> PyResult<f64> {
+        if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
+            let view = arr.as_array();
+            return py
+                .allow_threads(move || crate::metrics::davies_bouldin_score(&view, &labels))
+                .map_err(|e| pyo3::PyErr::from(e));
+        }
+        if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+            let view = arr.as_array();
+            return py
+                .allow_threads(move || crate::metrics::davies_bouldin_score(&view, &labels))
+                .map_err(|e| pyo3::PyErr::from(e));
+        }
+        Err(pyo3::exceptions::PyValueError::new_err(
+            "Expected float32 or float64 array",
+        ))
+    }
+
     #[pymodule]
     pub fn _rustcluster(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<KMeans>()?;
         m.add_class::<Dbscan>()?;
+        m.add_function(wrap_pyfunction!(silhouette_score, m)?)?;
+        m.add_function(wrap_pyfunction!(calinski_harabasz_score, m)?)?;
+        m.add_function(wrap_pyfunction!(davies_bouldin_score, m)?)?;
         Ok(())
     }
 }

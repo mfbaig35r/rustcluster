@@ -4,8 +4,19 @@ import numpy as np
 
 from rustcluster._rustcluster import KMeans as _RustKMeans
 from rustcluster._rustcluster import Dbscan as _RustDbscan
+from rustcluster._rustcluster import (
+    silhouette_score as _silhouette_score,
+    calinski_harabasz_score as _calinski_harabasz_score,
+    davies_bouldin_score as _davies_bouldin_score,
+)
 
-__all__ = ["KMeans", "DBSCAN"]
+__all__ = [
+    "KMeans",
+    "DBSCAN",
+    "silhouette_score",
+    "calinski_harabasz_score",
+    "davies_bouldin_score",
+]
 
 
 def _prepare_array(X):
@@ -199,3 +210,59 @@ class DBSCAN:
             f"DBSCAN(eps={self._eps}, min_samples={self._min_samples}, "
             f"metric=\"{self._metric}\")"
         )
+
+
+# ---------------------------------------------------------------------------
+# Clustering metrics
+# ---------------------------------------------------------------------------
+
+def silhouette_score(X, labels):
+    """Compute the mean silhouette coefficient for all samples.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+    labels : array-like of shape (n_samples,)
+        Cluster labels. -1 for noise (excluded from computation).
+
+    Returns
+    -------
+    score : float in [-1, 1]. Higher is better.
+    """
+    X = _prepare_array(X)
+    labels = np.asarray(labels, dtype=np.int64).tolist()
+    return _silhouette_score(X, labels)
+
+
+def calinski_harabasz_score(X, labels):
+    """Compute the Calinski-Harabasz index (Variance Ratio Criterion).
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+    labels : array-like of shape (n_samples,)
+
+    Returns
+    -------
+    score : float. Higher is better.
+    """
+    X = _prepare_array(X)
+    labels = np.asarray(labels, dtype=np.int64).tolist()
+    return _calinski_harabasz_score(X, labels)
+
+
+def davies_bouldin_score(X, labels):
+    """Compute the Davies-Bouldin index.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+    labels : array-like of shape (n_samples,)
+
+    Returns
+    -------
+    score : float. Lower is better.
+    """
+    X = _prepare_array(X)
+    labels = np.asarray(labels, dtype=np.int64).tolist()
+    return _davies_bouldin_score(X, labels)
