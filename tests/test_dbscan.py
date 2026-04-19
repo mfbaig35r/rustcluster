@@ -251,3 +251,31 @@ class TestFloat32:
         model = DBSCAN(eps=2.0, min_samples=2)
         model.fit(X)
         assert len(model.labels_) == 6
+
+
+# ---------------------------------------------------------------------------
+# Cosine distance
+# ---------------------------------------------------------------------------
+
+class TestCosineDBSCAN:
+    def test_cosine_fit(self, two_blobs):
+        model = DBSCAN(eps=0.1, min_samples=3, metric="cosine")
+        model.fit(two_blobs)
+        assert len(model.labels_) == len(two_blobs)
+
+    def test_cosine_separates_directions(self):
+        """Cosine DBSCAN should cluster by direction."""
+        rng = np.random.default_rng(42)
+        dir1 = rng.normal(loc=[1, 0], scale=0.05, size=(20, 2))
+        dir2 = rng.normal(loc=[0, 1], scale=0.05, size=(20, 2))
+        X = np.vstack([dir1, dir2])
+
+        model = DBSCAN(eps=0.1, min_samples=3, metric="cosine")
+        model.fit(X)
+        unique = set(model.labels_)
+        unique.discard(-1)
+        assert len(unique) == 2
+
+    def test_cosine_metric_in_repr(self):
+        model = DBSCAN(metric="cosine")
+        assert 'metric="cosine"' in repr(model)

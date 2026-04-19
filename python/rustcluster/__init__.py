@@ -36,9 +36,12 @@ class KMeans:
     algorithm : str, default="auto"
         Algorithm to use: "auto", "lloyd", or "hamerly".
         "auto" selects based on data dimensions and cluster count.
+        Note: cosine metric forces "lloyd" (Hamerly assumes Euclidean bounds).
+    metric : str, default="euclidean"
+        Distance metric: "euclidean" or "cosine".
     """
 
-    def __init__(self, n_clusters, max_iter=300, tol=1e-4, random_state=0, n_init=10, algorithm="auto"):
+    def __init__(self, n_clusters, max_iter=300, tol=1e-4, random_state=0, n_init=10, algorithm="auto", metric="euclidean"):
         self._model = _RustKMeans(
             n_clusters=n_clusters,
             max_iter=max_iter,
@@ -46,6 +49,7 @@ class KMeans:
             random_state=random_state,
             n_init=n_init,
             algorithm=algorithm,
+            metric=metric,
         )
         self._n_clusters = n_clusters
         self._max_iter = max_iter
@@ -53,6 +57,7 @@ class KMeans:
         self._random_state = random_state
         self._n_init = n_init
         self._algorithm = algorithm
+        self._metric = metric
 
     def fit(self, X):
         """Fit the K-means model to data.
@@ -121,7 +126,8 @@ class KMeans:
         return (
             f"KMeans(n_clusters={self._n_clusters}, max_iter={self._max_iter}, "
             f"tol={self._tol}, random_state={self._random_state}, "
-            f"n_init={self._n_init}, algorithm=\"{self._algorithm}\")"
+            f"n_init={self._n_init}, algorithm=\"{self._algorithm}\", "
+            f"metric=\"{self._metric}\")"
         )
 
 
@@ -135,7 +141,7 @@ class DBSCAN:
     min_samples : int, default=5
         Minimum number of points required to form a core point.
     metric : str, default="euclidean"
-        Distance metric. Only "euclidean" is supported.
+        Distance metric: "euclidean" or "cosine".
     """
 
     def __init__(self, eps=0.5, min_samples=5, metric="euclidean"):

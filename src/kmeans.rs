@@ -5,7 +5,7 @@ use rand_distr::WeightedIndex;
 use rand_distr::Distribution;
 use rayon::prelude::*;
 
-use crate::distance::{Distance, Scalar, SquaredEuclidean};
+use crate::distance::{CosineDistance, Distance, Metric, Scalar, SquaredEuclidean};
 use crate::error::ClusterError;
 use crate::utils::{assign_nearest_with, validate_data_generic};
 
@@ -77,6 +77,41 @@ pub fn run_kmeans_n_init_f32(
     algo: Algorithm,
 ) -> Result<KMeansState<f32>, ClusterError> {
     run_kmeans_n_init_generic::<f32, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo)
+}
+
+/// Run K-means with runtime metric selection (f64).
+/// Cosine distance forces Lloyd (Hamerly assumes Euclidean bounds).
+pub fn run_kmeans_with_metric(
+    data: &ArrayView2<f64>,
+    k: usize,
+    max_iter: usize,
+    tol: f64,
+    seed: u64,
+    n_init: usize,
+    algo: Algorithm,
+    metric: Metric,
+) -> Result<KMeansState<f64>, ClusterError> {
+    match metric {
+        Metric::Euclidean => run_kmeans_n_init_generic::<f64, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo),
+        Metric::Cosine => run_kmeans_n_init_generic::<f64, CosineDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
+    }
+}
+
+/// Run K-means with runtime metric selection (f32).
+pub fn run_kmeans_with_metric_f32(
+    data: &ArrayView2<f32>,
+    k: usize,
+    max_iter: usize,
+    tol: f64,
+    seed: u64,
+    n_init: usize,
+    algo: Algorithm,
+    metric: Metric,
+) -> Result<KMeansState<f32>, ClusterError> {
+    match metric {
+        Metric::Euclidean => run_kmeans_n_init_generic::<f32, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo),
+        Metric::Cosine => run_kmeans_n_init_generic::<f32, CosineDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
+    }
 }
 
 // ---- Generic implementation ----

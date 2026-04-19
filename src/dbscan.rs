@@ -11,7 +11,7 @@ use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
-use crate::distance::{Distance, Scalar, SquaredEuclidean};
+use crate::distance::{CosineDistance, Distance, Metric, Scalar, SquaredEuclidean};
 use crate::error::ClusterError;
 use crate::utils::validate_data_generic;
 
@@ -35,7 +35,7 @@ pub fn run_dbscan(
     eps: f64,
     min_samples: usize,
 ) -> Result<DbscanState<f64>, ClusterError> {
-    run_dbscan_generic::<f64, SquaredEuclidean>(data, eps, min_samples)
+    run_dbscan_with_metric(data, eps, min_samples, Metric::Euclidean)
 }
 
 /// Run DBSCAN with f32 data and Euclidean distance.
@@ -44,20 +44,53 @@ pub fn run_dbscan_f32(
     eps: f64,
     min_samples: usize,
 ) -> Result<DbscanState<f32>, ClusterError> {
-    run_dbscan_generic::<f32, SquaredEuclidean>(data, eps, min_samples)
+    run_dbscan_with_metric_f32(data, eps, min_samples, Metric::Euclidean)
+}
+
+/// Run DBSCAN with runtime metric selection (f64).
+pub fn run_dbscan_with_metric(
+    data: &ArrayView2<f64>,
+    eps: f64,
+    min_samples: usize,
+    metric: Metric,
+) -> Result<DbscanState<f64>, ClusterError> {
+    // Validate eps before squaring (catches 0 and negative)
+    if eps <= 0.0 || !eps.is_finite() {
+        return Err(ClusterError::InvalidEps(eps));
+    }
+    match metric {
+        Metric::Euclidean => run_dbscan_generic::<f64, SquaredEuclidean>(data, eps * eps, min_samples),
+        Metric::Cosine => run_dbscan_generic::<f64, CosineDistance>(data, eps, min_samples),
+    }
+}
+
+/// Run DBSCAN with runtime metric selection (f32).
+pub fn run_dbscan_with_metric_f32(
+    data: &ArrayView2<f32>,
+    eps: f64,
+    min_samples: usize,
+    metric: Metric,
+) -> Result<DbscanState<f32>, ClusterError> {
+    if eps <= 0.0 || !eps.is_finite() {
+        return Err(ClusterError::InvalidEps(eps));
+    }
+    match metric {
+        Metric::Euclidean => run_dbscan_generic::<f32, SquaredEuclidean>(data, eps * eps, min_samples),
+        Metric::Cosine => run_dbscan_generic::<f32, CosineDistance>(data, eps, min_samples),
+    }
 }
 
 // ---- Generic implementation ----
 
+/// `threshold` is the pre-computed comparison value (eps^2 for Euclidean, eps for Cosine).
 fn run_dbscan_generic<F: Scalar, D: Distance<F>>(
     data: &ArrayView2<F>,
-    eps: f64,
+    threshold: f64,
     min_samples: usize,
 ) -> Result<DbscanState<F>, ClusterError> {
-    // Validate inputs
     validate_data_generic(data)?;
-    if eps <= 0.0 || !eps.is_finite() {
-        return Err(ClusterError::InvalidEps(eps));
+    if threshold <= 0.0 || !threshold.is_finite() {
+        return Err(ClusterError::InvalidEps(threshold));
     }
     if min_samples == 0 {
         return Err(ClusterError::InvalidMinSamples(0));
@@ -66,8 +99,7 @@ fn run_dbscan_generic<F: Scalar, D: Distance<F>>(
     let (n, d) = data.dim();
     let data_slice = data.as_slice().expect("data must be C-contiguous");
 
-    // Compare squared distances against eps^2 to avoid sqrt in the hot path
-    let eps_sq = F::from_f64_lossy(eps * eps);
+    let eps_f = F::from_f64_lossy(threshold);
 
     // ---- Phase 1: Parallel neighborhood scan ----
     let neighbors: Vec<Vec<usize>> = (0..n)
@@ -77,7 +109,7 @@ fn run_dbscan_generic<F: Scalar, D: Distance<F>>(
             let mut nbrs = Vec::new();
             for j in 0..n {
                 let point_j = &data_slice[j * d..(j + 1) * d];
-                if D::distance(point_i, point_j) <= eps_sq {
+                if D::distance(point_i, point_j) <= eps_f {
                     nbrs.push(j);
                 }
             }

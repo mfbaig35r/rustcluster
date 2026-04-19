@@ -8,7 +8,7 @@ pub mod utils;
 /// Re-exports for Criterion benchmarks.
 #[doc(hidden)]
 pub mod _bench_api {
-    pub use crate::distance::{Distance, Scalar, SquaredEuclidean};
+    pub use crate::distance::{CosineDistance, Distance, Metric, Scalar, SquaredEuclidean};
     pub use crate::kmeans::{kmeans_plus_plus_init, run_kmeans_n_init, Algorithm};
     pub use crate::utils::{assign_nearest, assign_nearest_two, squared_euclidean};
 }
@@ -19,11 +19,16 @@ mod python_bindings {
     use pyo3::prelude::*;
     use rayon::prelude::*;
 
+    use crate::dbscan::{run_dbscan_with_metric, run_dbscan_with_metric_f32, DbscanState};
+    use crate::distance::Metric;
     use crate::error::ClusterError;
-    use crate::kmeans::{run_kmeans_n_init, run_kmeans_n_init_f32, Algorithm, KMeansState};
-    use crate::utils::{validate_predict_data, validate_predict_data_generic};
+    use crate::kmeans::{
+        run_kmeans_with_metric, run_kmeans_with_metric_f32, Algorithm, KMeansState,
+    };
+    use crate::utils::{assign_nearest_with, validate_predict_data, validate_predict_data_generic};
 
-    /// Fitted state holding either f64 or f32 results.
+    // ---- KMeans ----
+
     enum FittedState {
         F64(KMeansState<f64>),
         F32(KMeansState<f32>),
@@ -37,13 +42,14 @@ mod python_bindings {
         random_state: u64,
         n_init: usize,
         algorithm: Algorithm,
+        metric: Metric,
         fitted: Option<FittedState>,
     }
 
     #[pymethods]
     impl KMeans {
         #[new]
-        #[pyo3(signature = (n_clusters, max_iter=300, tol=1e-4, random_state=0, n_init=10, algorithm="auto"))]
+        #[pyo3(signature = (n_clusters, max_iter=300, tol=1e-4, random_state=0, n_init=10, algorithm="auto", metric="euclidean"))]
         fn new(
             n_clusters: usize,
             max_iter: usize,
@@ -51,6 +57,7 @@ mod python_bindings {
             random_state: u64,
             n_init: usize,
             algorithm: &str,
+            metric: &str,
         ) -> PyResult<Self> {
             if n_clusters == 0 {
                 return Err(ClusterError::InvalidClusters { k: 0, n: 0 }.into());
@@ -66,6 +73,7 @@ mod python_bindings {
             }
 
             let algo = Algorithm::from_str(algorithm)?;
+            let met = Metric::from_str(metric)?;
 
             Ok(KMeans {
                 n_clusters,
@@ -74,76 +82,62 @@ mod python_bindings {
                 random_state,
                 n_init,
                 algorithm: algo,
+                metric: met,
                 fitted: None,
             })
         }
 
-        /// Fit the K-means model (f64 input).
-        fn fit_f64(&mut self, py: Python<'_>, x: PyReadonlyArray2<'_, f64>) -> PyResult<()> {
-            if !x.is_c_contiguous() {
-                return Err(ClusterError::NotContiguous.into());
-            }
-            let view = x.as_array();
-            let k = self.n_clusters;
-            let max_iter = self.max_iter;
-            let tol = self.tol;
-            let seed = self.random_state;
-            let n_init = self.n_init;
-            let algo = self.algorithm;
-
-            let state = py.allow_threads(move || {
-                run_kmeans_n_init(&view, k, max_iter, tol, seed, n_init, algo)
-            })?;
-            self.fitted = Some(FittedState::F64(state));
-            Ok(())
-        }
-
-        /// Fit the K-means model (f32 input).
-        fn fit_f32(&mut self, py: Python<'_>, x: PyReadonlyArray2<'_, f32>) -> PyResult<()> {
-            if !x.is_c_contiguous() {
-                return Err(ClusterError::NotContiguous.into());
-            }
-            let view = x.as_array();
-            let k = self.n_clusters;
-            let max_iter = self.max_iter;
-            let tol = self.tol;
-            let seed = self.random_state;
-            let n_init = self.n_init;
-            let algo = self.algorithm;
-
-            let state = py.allow_threads(move || {
-                run_kmeans_n_init_f32(&view, k, max_iter, tol, seed, n_init, algo)
-            })?;
-            self.fitted = Some(FittedState::F32(state));
-            Ok(())
-        }
-
-        /// Fit — dispatches to f64 or f32 based on input dtype.
         fn fit(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
-            // Try f64 first (most common)
+            let k = self.n_clusters;
+            let max_iter = self.max_iter;
+            let tol = self.tol;
+            let seed = self.random_state;
+            let n_init = self.n_init;
+            let algo = self.algorithm;
+            let metric = self.metric;
+
             if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
-                return self.fit_f64(py, arr);
+                if !arr.is_c_contiguous() {
+                    return Err(ClusterError::NotContiguous.into());
+                }
+                let view = arr.as_array();
+                let state = py.allow_threads(move || {
+                    run_kmeans_with_metric(&view, k, max_iter, tol, seed, n_init, algo, metric)
+                })?;
+                self.fitted = Some(FittedState::F64(state));
+                return Ok(());
             }
             if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
-                return self.fit_f32(py, arr);
+                if !arr.is_c_contiguous() {
+                    return Err(ClusterError::NotContiguous.into());
+                }
+                let view = arr.as_array();
+                let state = py.allow_threads(move || {
+                    run_kmeans_with_metric_f32(&view, k, max_iter, tol, seed, n_init, algo, metric)
+                })?;
+                self.fitted = Some(FittedState::F32(state));
+                return Ok(());
             }
             Err(pyo3::exceptions::PyValueError::new_err(
                 "Expected a C-contiguous float32 or float64 NumPy array",
             ))
         }
 
-        /// Predict cluster labels for new data.
         fn predict<'py>(
             &self,
             py: Python<'py>,
             x: &Bound<'_, pyo3::types::PyAny>,
         ) -> PyResult<Bound<'py, PyArray1<i64>>> {
+            let metric = self.metric;
             match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
                 FittedState::F64(state) => {
-                    let arr = x.extract::<PyReadonlyArray2<'_, f64>>()
-                        .map_err(|_| pyo3::exceptions::PyValueError::new_err(
-                            "Model was fit with float64 — predict input must also be float64"
-                        ))?;
+                    let arr = x
+                        .extract::<PyReadonlyArray2<'_, f64>>()
+                        .map_err(|_| {
+                            pyo3::exceptions::PyValueError::new_err(
+                                "Model was fit with float64 — predict input must also be float64",
+                            )
+                        })?;
                     if !arr.is_c_contiguous() {
                         return Err(ClusterError::NotContiguous.into());
                     }
@@ -156,13 +150,26 @@ mod python_bindings {
 
                     let labels = py.allow_threads(move || {
                         let (n, d) = view.dim();
-                        let data_slice = view.as_slice().expect("data is C-contiguous");
-                        let centroids_slice = centroids.as_slice().expect("centroids are C-contiguous");
+                        let data_slice = view.as_slice().expect("C-contiguous");
+                        let centroids_slice = centroids.as_slice().expect("C-contiguous");
                         (0..n)
                             .into_par_iter()
                             .map(|i| {
                                 let point = &data_slice[i * d..(i + 1) * d];
-                                let (idx, _) = crate::utils::assign_nearest(point, centroids_slice, k, d);
+                                let (idx, _) = match metric {
+                                    Metric::Euclidean => assign_nearest_with::<
+                                        f64,
+                                        crate::distance::SquaredEuclidean,
+                                    >(
+                                        point, centroids_slice, k, d
+                                    ),
+                                    Metric::Cosine => assign_nearest_with::<
+                                        f64,
+                                        crate::distance::CosineDistance,
+                                    >(
+                                        point, centroids_slice, k, d
+                                    ),
+                                };
                                 idx as i64
                             })
                             .collect::<Vec<i64>>()
@@ -170,10 +177,13 @@ mod python_bindings {
                     Ok(PyArray1::from_vec(py, labels))
                 }
                 FittedState::F32(state) => {
-                    let arr = x.extract::<PyReadonlyArray2<'_, f32>>()
-                        .map_err(|_| pyo3::exceptions::PyValueError::new_err(
-                            "Model was fit with float32 — predict input must also be float32"
-                        ))?;
+                    let arr = x
+                        .extract::<PyReadonlyArray2<'_, f32>>()
+                        .map_err(|_| {
+                            pyo3::exceptions::PyValueError::new_err(
+                                "Model was fit with float32 — predict input must also be float32",
+                            )
+                        })?;
                     if !arr.is_c_contiguous() {
                         return Err(ClusterError::NotContiguous.into());
                     }
@@ -185,15 +195,27 @@ mod python_bindings {
                     let k = self.n_clusters;
 
                     let labels = py.allow_threads(move || {
-                        use crate::distance::SquaredEuclidean;
                         let (n, d) = view.dim();
-                        let data_slice = view.as_slice().expect("data is C-contiguous");
-                        let centroids_slice = centroids.as_slice().expect("centroids are C-contiguous");
+                        let data_slice = view.as_slice().expect("C-contiguous");
+                        let centroids_slice = centroids.as_slice().expect("C-contiguous");
                         (0..n)
                             .into_par_iter()
                             .map(|i| {
                                 let point = &data_slice[i * d..(i + 1) * d];
-                                let (idx, _) = crate::utils::assign_nearest_with::<f32, SquaredEuclidean>(point, centroids_slice, k, d);
+                                let (idx, _) = match metric {
+                                    Metric::Euclidean => assign_nearest_with::<
+                                        f32,
+                                        crate::distance::SquaredEuclidean,
+                                    >(
+                                        point, centroids_slice, k, d
+                                    ),
+                                    Metric::Cosine => assign_nearest_with::<
+                                        f32,
+                                        crate::distance::CosineDistance,
+                                    >(
+                                        point, centroids_slice, k, d
+                                    ),
+                                };
                                 idx as i64
                             })
                             .collect::<Vec<i64>>()
@@ -203,7 +225,6 @@ mod python_bindings {
             }
         }
 
-        /// Fit the model and return cluster labels.
         fn fit_predict<'py>(
             &mut self,
             py: Python<'py>,
@@ -229,12 +250,12 @@ mod python_bindings {
         #[getter]
         fn cluster_centers_<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
             match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
-                FittedState::F64(s) => {
-                    Ok(PyArray2::from_owned_array(py, s.centroids.clone()).into_any().unbind())
-                }
-                FittedState::F32(s) => {
-                    Ok(PyArray2::from_owned_array(py, s.centroids.clone()).into_any().unbind())
-                }
+                FittedState::F64(s) => Ok(PyArray2::from_owned_array(py, s.centroids.clone())
+                    .into_any()
+                    .unbind()),
+                FittedState::F32(s) => Ok(PyArray2::from_owned_array(py, s.centroids.clone())
+                    .into_any()
+                    .unbind()),
             }
         }
 
@@ -260,16 +281,18 @@ mod python_bindings {
                 Algorithm::Lloyd => "lloyd",
                 Algorithm::Hamerly => "hamerly",
             };
+            let met_str = match self.metric {
+                Metric::Euclidean => "euclidean",
+                Metric::Cosine => "cosine",
+            };
             format!(
-                "KMeans(n_clusters={}, max_iter={}, tol={}, random_state={}, n_init={}, algorithm=\"{}\")",
-                self.n_clusters, self.max_iter, self.tol, self.random_state, self.n_init, algo_str
+                "KMeans(n_clusters={}, max_iter={}, tol={}, random_state={}, n_init={}, algorithm=\"{}\", metric=\"{}\")",
+                self.n_clusters, self.max_iter, self.tol, self.random_state, self.n_init, algo_str, met_str
             )
         }
     }
 
-    // ---- DBSCAN pyclass ----
-
-    use crate::dbscan::{run_dbscan, run_dbscan_f32, DbscanState};
+    // ---- DBSCAN ----
 
     enum DbscanFitted {
         F64(DbscanState<f64>),
@@ -280,7 +303,7 @@ mod python_bindings {
     struct Dbscan {
         eps: f64,
         min_samples: usize,
-        metric: String,
+        metric: Metric,
         fitted: Option<DbscanFitted>,
     }
 
@@ -295,28 +318,29 @@ mod python_bindings {
             if min_samples == 0 {
                 return Err(ClusterError::InvalidMinSamples(0).into());
             }
-            let metric_lower = metric.to_lowercase();
-            if metric_lower != "euclidean" {
-                return Err(ClusterError::InvalidMetric(metric.to_string()).into());
-            }
+            let met = Metric::from_str(metric)?;
 
             Ok(Dbscan {
                 eps,
                 min_samples,
-                metric: metric_lower,
+                metric: met,
                 fitted: None,
             })
         }
 
         fn fit(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
+            let eps = self.eps;
+            let min_samples = self.min_samples;
+            let metric = self.metric;
+
             if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
                 if !arr.is_c_contiguous() {
                     return Err(ClusterError::NotContiguous.into());
                 }
                 let view = arr.as_array();
-                let eps = self.eps;
-                let min_samples = self.min_samples;
-                let state = py.allow_threads(move || run_dbscan(&view, eps, min_samples))?;
+                let state = py.allow_threads(move || {
+                    run_dbscan_with_metric(&view, eps, min_samples, metric)
+                })?;
                 self.fitted = Some(DbscanFitted::F64(state));
                 return Ok(());
             }
@@ -325,9 +349,9 @@ mod python_bindings {
                     return Err(ClusterError::NotContiguous.into());
                 }
                 let view = arr.as_array();
-                let eps = self.eps;
-                let min_samples = self.min_samples;
-                let state = py.allow_threads(move || run_dbscan_f32(&view, eps, min_samples))?;
+                let state = py.allow_threads(move || {
+                    run_dbscan_with_metric_f32(&view, eps, min_samples, metric)
+                })?;
                 self.fitted = Some(DbscanFitted::F32(state));
                 return Ok(());
             }
@@ -359,10 +383,17 @@ mod python_bindings {
         }
 
         #[getter]
-        fn core_sample_indices_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
+        fn core_sample_indices_<'py>(
+            &self,
+            py: Python<'py>,
+        ) -> PyResult<Bound<'py, PyArray1<i64>>> {
             let indices = match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
-                DbscanFitted::F64(s) => s.core_sample_indices.iter().map(|&i| i as i64).collect::<Vec<_>>(),
-                DbscanFitted::F32(s) => s.core_sample_indices.iter().map(|&i| i as i64).collect::<Vec<_>>(),
+                DbscanFitted::F64(s) => {
+                    s.core_sample_indices.iter().map(|&i| i as i64).collect::<Vec<_>>()
+                }
+                DbscanFitted::F32(s) => {
+                    s.core_sample_indices.iter().map(|&i| i as i64).collect::<Vec<_>>()
+                }
             };
             Ok(PyArray1::from_vec(py, indices))
         }
@@ -370,19 +401,23 @@ mod python_bindings {
         #[getter]
         fn components_<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
             match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
-                DbscanFitted::F64(s) => {
-                    Ok(PyArray2::from_owned_array(py, s.components.clone()).into_any().unbind())
-                }
-                DbscanFitted::F32(s) => {
-                    Ok(PyArray2::from_owned_array(py, s.components.clone()).into_any().unbind())
-                }
+                DbscanFitted::F64(s) => Ok(PyArray2::from_owned_array(py, s.components.clone())
+                    .into_any()
+                    .unbind()),
+                DbscanFitted::F32(s) => Ok(PyArray2::from_owned_array(py, s.components.clone())
+                    .into_any()
+                    .unbind()),
             }
         }
 
         fn __repr__(&self) -> String {
+            let met_str = match self.metric {
+                Metric::Euclidean => "euclidean",
+                Metric::Cosine => "cosine",
+            };
             format!(
                 "DBSCAN(eps={}, min_samples={}, metric=\"{}\")",
-                self.eps, self.min_samples, self.metric
+                self.eps, self.min_samples, met_str
             )
         }
     }

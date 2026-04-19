@@ -400,3 +400,57 @@ class TestFloat32:
         model.fit(X)
         assert len(model.labels_) == len(X)
         assert model.cluster_centers_.dtype == np.float32
+
+
+# ---------------------------------------------------------------------------
+# Cosine distance
+# ---------------------------------------------------------------------------
+
+class TestCosineKMeans:
+    def test_cosine_fit(self, blob_data):
+        model = KMeans(n_clusters=2, random_state=42, metric="cosine")
+        model.fit(blob_data)
+        assert len(model.labels_) == len(blob_data)
+        assert model.inertia_ >= 0
+
+    def test_cosine_predict(self, blob_data):
+        model = KMeans(n_clusters=2, random_state=42, metric="cosine")
+        model.fit(blob_data)
+        preds = model.predict(blob_data)
+        np.testing.assert_array_equal(preds, model.labels_)
+
+    def test_cosine_separates_directions(self):
+        """Cosine K-means should separate by direction, not magnitude."""
+        # Points in two different directions, varying magnitudes
+        rng = np.random.default_rng(42)
+        dir1 = rng.normal(loc=[1, 0], scale=0.1, size=(30, 2))  # pointing right
+        dir2 = rng.normal(loc=[0, 1], scale=0.1, size=(30, 2))  # pointing up
+        # Scale some points — cosine shouldn't care about magnitude
+        dir1[:10] *= 10
+        dir2[:10] *= 10
+        X = np.vstack([dir1, dir2])
+
+        model = KMeans(n_clusters=2, random_state=42, metric="cosine", n_init=5)
+        model.fit(X)
+        # First 30 should share a cluster, last 30 another
+        assert len(set(model.labels_[:30])) == 1
+        assert len(set(model.labels_[30:])) == 1
+        assert model.labels_[0] != model.labels_[30]
+
+    def test_cosine_forces_lloyd(self):
+        """Cosine metric should work even with algorithm='hamerly' (forces Lloyd internally)."""
+        X = np.array([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.1, 0.9]])
+        model = KMeans(n_clusters=2, random_state=42, metric="cosine", algorithm="hamerly")
+        model.fit(X)
+        assert len(model.labels_) == 4
+
+    def test_cosine_reproducibility(self, blob_data):
+        m1 = KMeans(n_clusters=2, random_state=42, metric="cosine")
+        m1.fit(blob_data)
+        m2 = KMeans(n_clusters=2, random_state=42, metric="cosine")
+        m2.fit(blob_data)
+        np.testing.assert_array_equal(m1.labels_, m2.labels_)
+
+    def test_invalid_metric(self):
+        with pytest.raises(ValueError, match="metric"):
+            KMeans(n_clusters=2, metric="manhattan")
