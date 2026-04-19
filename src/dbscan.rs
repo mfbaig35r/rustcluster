@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 
 use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
 use crate::error::ClusterError;
+use crate::kdtree::{BBoxDistance, KdTree};
 use crate::utils::validate_data_generic;
 
 /// Result of a fitted DBSCAN model.
@@ -59,9 +60,9 @@ pub fn run_dbscan_with_metric(
         return Err(ClusterError::InvalidEps(eps));
     }
     match metric {
-        Metric::Euclidean => run_dbscan_generic::<f64, SquaredEuclidean>(data, eps * eps, min_samples),
+        Metric::Euclidean => run_dbscan_accelerated::<f64, SquaredEuclidean, SquaredEuclidean>(data, eps * eps, min_samples),
         Metric::Cosine => run_dbscan_generic::<f64, CosineDistance>(data, eps, min_samples),
-        Metric::Manhattan => run_dbscan_generic::<f64, ManhattanDistance>(data, eps, min_samples),
+        Metric::Manhattan => run_dbscan_accelerated::<f64, ManhattanDistance, ManhattanDistance>(data, eps, min_samples),
     }
 }
 
@@ -76,13 +77,73 @@ pub fn run_dbscan_with_metric_f32(
         return Err(ClusterError::InvalidEps(eps));
     }
     match metric {
-        Metric::Euclidean => run_dbscan_generic::<f32, SquaredEuclidean>(data, eps * eps, min_samples),
+        Metric::Euclidean => run_dbscan_accelerated::<f32, SquaredEuclidean, SquaredEuclidean>(data, eps * eps, min_samples),
         Metric::Cosine => run_dbscan_generic::<f32, CosineDistance>(data, eps, min_samples),
-        Metric::Manhattan => run_dbscan_generic::<f32, ManhattanDistance>(data, eps, min_samples),
+        Metric::Manhattan => run_dbscan_accelerated::<f32, ManhattanDistance, ManhattanDistance>(data, eps, min_samples),
     }
 }
 
-// ---- Generic implementation ----
+// ---- Accelerated implementation (tries KD-tree, falls back to brute force) ----
+
+fn run_dbscan_accelerated<F: Scalar, D: Distance<F>, B: BBoxDistance>(
+    data: &ArrayView2<F>,
+    threshold: f64,
+    min_samples: usize,
+) -> Result<DbscanState<F>, ClusterError> {
+    validate_data_generic(data)?;
+    if threshold <= 0.0 || !threshold.is_finite() {
+        return Err(ClusterError::InvalidEps(threshold));
+    }
+    if min_samples == 0 {
+        return Err(ClusterError::InvalidMinSamples(0));
+    }
+
+    let (n, d) = data.dim();
+    let data_slice = data.as_slice().expect("data must be C-contiguous");
+    let eps_f = F::from_f64_lossy(threshold);
+
+    // Try KD-tree
+    let tree = KdTree::build_v2(data_slice, n, d);
+
+    let neighbors: Vec<Vec<usize>> = match tree {
+        Some(ref tree) => {
+            // Convert data to f64 once for queries
+            let data_f64: Vec<f64> = data_slice.iter().map(|v| v.to_f64_lossy()).collect();
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let query = &data_f64[i * d..(i + 1) * d];
+                    let mut nbrs = tree.query_radius::<B>(query, threshold);
+                    nbrs.sort(); // deterministic BFS order
+                    nbrs
+                })
+                .collect()
+        }
+        None => {
+            // Brute force fallback (high-d)
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let point_i = &data_slice[i * d..(i + 1) * d];
+                    let mut nbrs = Vec::new();
+                    for j in 0..n {
+                        let point_j = &data_slice[j * d..(j + 1) * d];
+                        if D::distance(point_i, point_j) <= eps_f {
+                            nbrs.push(j);
+                        }
+                    }
+                    nbrs
+                })
+                .collect()
+        }
+    };
+
+    // Rest is identical to run_dbscan_generic — reuse the cluster expansion
+    let is_core: Vec<bool> = neighbors.iter().map(|nbrs| nbrs.len() >= min_samples).collect();
+    run_dbscan_cluster_expansion(data_slice, n, d, &neighbors, &is_core)
+}
+
+// ---- Generic implementation (brute force only, for Cosine) ----
 
 /// `threshold` is the pre-computed comparison value (eps^2 for Euclidean, eps for Cosine).
 fn run_dbscan_generic<F: Scalar, D: Distance<F>>(
@@ -119,23 +180,26 @@ fn run_dbscan_generic<F: Scalar, D: Distance<F>>(
         })
         .collect();
 
-    // Identify core points
-    let is_core: Vec<bool> = neighbors
-        .iter()
-        .map(|nbrs| nbrs.len() >= min_samples)
-        .collect();
+    let is_core: Vec<bool> = neighbors.iter().map(|nbrs| nbrs.len() >= min_samples).collect();
+    run_dbscan_cluster_expansion(data_slice, n, d, &neighbors, &is_core)
+}
 
-    // ---- Phase 2: Sequential BFS cluster expansion ----
+/// Phase 2: BFS cluster expansion + result building. Shared by both brute-force and KD-tree paths.
+fn run_dbscan_cluster_expansion<F: Scalar>(
+    data_slice: &[F],
+    n: usize,
+    d: usize,
+    neighbors: &[Vec<usize>],
+    is_core: &[bool],
+) -> Result<DbscanState<F>, ClusterError> {
     let mut labels = vec![-1i64; n];
     let mut cluster_id = 0i64;
 
     for i in 0..n {
-        // Skip already labeled or non-core points
         if labels[i] != -1 || !is_core[i] {
             continue;
         }
 
-        // Start a new cluster from this core point
         labels[i] = cluster_id;
         let mut queue = VecDeque::new();
         queue.push_back(i);
@@ -143,10 +207,7 @@ fn run_dbscan_generic<F: Scalar, D: Distance<F>>(
         while let Some(p) = queue.pop_front() {
             for &q in &neighbors[p] {
                 if labels[q] == -1 {
-                    // Label this point (border or core)
                     labels[q] = cluster_id;
-
-                    // Only expand through core points
                     if is_core[q] {
                         queue.push_back(q);
                     }
@@ -157,10 +218,8 @@ fn run_dbscan_generic<F: Scalar, D: Distance<F>>(
         cluster_id += 1;
     }
 
-    // Collect core sample indices and components
     let core_sample_indices: Vec<usize> = is_core
-        .iter()
-        .enumerate()
+        .iter().enumerate()
         .filter(|(_, &c)| c)
         .map(|(i, _)| i)
         .collect();

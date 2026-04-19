@@ -20,6 +20,7 @@ use rayon::prelude::*;
 
 use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
 use crate::error::ClusterError;
+use crate::kdtree::{BBoxDistance, KdTree};
 use crate::utils::validate_data_generic;
 
 /// Result of a fitted HDBSCAN model.
@@ -58,9 +59,9 @@ pub fn run_hdbscan_with_metric(
     selection: ClusterSelectionMethod,
 ) -> Result<HdbscanState<f64>, ClusterError> {
     match metric {
-        Metric::Euclidean => run_hdbscan_generic::<f64, SquaredEuclidean>(data, min_cluster_size, min_samples, selection),
+        Metric::Euclidean => run_hdbscan_accelerated::<f64, SquaredEuclidean, SquaredEuclidean>(data, min_cluster_size, min_samples, selection),
         Metric::Cosine => run_hdbscan_generic::<f64, CosineDistance>(data, min_cluster_size, min_samples, selection),
-        Metric::Manhattan => run_hdbscan_generic::<f64, ManhattanDistance>(data, min_cluster_size, min_samples, selection),
+        Metric::Manhattan => run_hdbscan_accelerated::<f64, ManhattanDistance, ManhattanDistance>(data, min_cluster_size, min_samples, selection),
     }
 }
 
@@ -72,13 +73,86 @@ pub fn run_hdbscan_with_metric_f32(
     selection: ClusterSelectionMethod,
 ) -> Result<HdbscanState<f32>, ClusterError> {
     match metric {
-        Metric::Euclidean => run_hdbscan_generic::<f32, SquaredEuclidean>(data, min_cluster_size, min_samples, selection),
+        Metric::Euclidean => run_hdbscan_accelerated::<f32, SquaredEuclidean, SquaredEuclidean>(data, min_cluster_size, min_samples, selection),
         Metric::Cosine => run_hdbscan_generic::<f32, CosineDistance>(data, min_cluster_size, min_samples, selection),
-        Metric::Manhattan => run_hdbscan_generic::<f32, ManhattanDistance>(data, min_cluster_size, min_samples, selection),
+        Metric::Manhattan => run_hdbscan_accelerated::<f32, ManhattanDistance, ManhattanDistance>(data, min_cluster_size, min_samples, selection),
     }
 }
 
-// ---- Generic implementation ----
+// ---- Accelerated implementation (KD-tree for core distances) ----
+
+fn run_hdbscan_accelerated<F: Scalar, D: Distance<F>, B: BBoxDistance>(
+    data: &ArrayView2<F>,
+    min_cluster_size: usize,
+    min_samples: usize,
+    selection: ClusterSelectionMethod,
+) -> Result<HdbscanState<F>, ClusterError> {
+    validate_data_generic(data)?;
+
+    let (n, d) = data.dim();
+    if min_cluster_size < 2 {
+        return Err(ClusterError::InvalidMinClusterSize(min_cluster_size));
+    }
+    if min_samples == 0 {
+        return Err(ClusterError::InvalidMinSamples(0));
+    }
+
+    let data_slice = data.as_slice().expect("data must be C-contiguous");
+
+    if n < min_cluster_size {
+        return Ok(HdbscanState {
+            labels: vec![-1; n],
+            probabilities: vec![0.0; n],
+            cluster_persistence: vec![],
+            n_clusters: 0,
+            _phantom: std::marker::PhantomData,
+        });
+    }
+
+    // Try KD-tree for core distances
+    let data_f64: Vec<f64> = data_slice.iter().map(|v| v.to_f64_lossy()).collect();
+    let tree = KdTree::build_v2(data_slice, n, d);
+
+    let core_dists = match tree {
+        Some(ref tree) => {
+            // KD-tree accelerated k-NN
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let query = &data_f64[i * d..(i + 1) * d];
+                    let knn = tree.query_knn::<B>(query, min_samples, Some(i));
+                    match knn.last() {
+                        Some(&(_, dist)) => D::to_metric(dist),
+                        None => 0.0,
+                    }
+                })
+                .collect::<Vec<f64>>()
+        }
+        None => {
+            // Brute force fallback
+            compute_core_distances::<F, D>(data_slice, n, d, min_samples)
+        }
+    };
+
+    // MST and remaining stages use existing code (still O(n²))
+    let mst = build_mst::<F, D>(data_slice, n, d, &core_dists);
+    let hierarchy = build_hierarchy(&mst, n);
+    let (labels, probabilities, persistence) =
+        condense_and_extract(&hierarchy, n, min_cluster_size, selection);
+
+    let n_clusters = {
+        let mut unique = std::collections::HashSet::new();
+        for &l in &labels { if l >= 0 { unique.insert(l); } }
+        unique.len()
+    };
+
+    Ok(HdbscanState {
+        labels, probabilities, cluster_persistence: persistence, n_clusters,
+        _phantom: std::marker::PhantomData,
+    })
+}
+
+// ---- Generic implementation (brute force, for Cosine) ----
 
 fn run_hdbscan_generic<F: Scalar, D: Distance<F>>(
     data: &ArrayView2<F>,

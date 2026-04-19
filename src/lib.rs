@@ -1,6 +1,9 @@
 pub mod agglomerative;
 pub mod dbscan;
 pub mod distance;
+// dead_code: KdTree::build is superseded by build_v2, kept for reference
+#[allow(dead_code)]
+pub mod kdtree;
 mod error;
 mod hamerly;
 pub mod hdbscan;
