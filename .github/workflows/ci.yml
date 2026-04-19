@@ -23,41 +23,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Create virtualenv and install deps
-        run: |
-          python -m venv .venv
-          .venv/bin/pip install maturin numpy pytest
-        shell: bash
+      - name: Install build tools
+        run: pip install maturin numpy pytest
 
-      - name: Create virtualenv and install deps (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          python -m venv .venv
-          .venv\Scripts\pip install maturin numpy pytest
-        shell: cmd
-
-      - name: Rust tests (no Python features)
+      - name: Rust tests
         run: cargo test --no-default-features --lib
 
-      - name: Build Python package (Unix)
-        if: runner.os != 'Windows'
-        run: .venv/bin/maturin develop --release
-        shell: bash
+      - name: Build and install package
+        run: pip install . -v
 
-      - name: Build Python package (Windows)
-        if: runner.os == 'Windows'
-        run: .venv\Scripts\maturin develop --release
-        shell: cmd
-
-      - name: Python tests (Unix)
-        if: runner.os != 'Windows'
-        run: .venv/bin/pytest tests/ -v
-        shell: bash
-
-      - name: Python tests (Windows)
-        if: runner.os == 'Windows'
-        run: .venv\Scripts\pytest tests/ -v
-        shell: cmd
+      - name: Python tests
+        run: pytest tests/ -v
 
   lint:
     runs-on: ubuntu-latest
@@ -68,5 +44,5 @@ jobs:
           components: clippy, rustfmt
       - name: Check formatting
         run: cargo fmt -- --check
-      - name: Clippy (no Python features)
+      - name: Clippy
         run: cargo clippy --no-default-features --lib -- -D warnings
