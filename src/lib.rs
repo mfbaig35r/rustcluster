@@ -1196,12 +1196,11 @@ mod python_bindings {
                     validate_predict_data(&view, expected_d)?;
                     let centroids = state.centroids.clone();
                     let k = self.n_clusters;
-                    let labels =
-                        py.allow_threads(move || {
-                            let (n, d) = view.dim();
-                            let ds = view.as_slice().expect("C-contiguous");
-                            let cs = centroids.as_slice().expect("C-contiguous");
-                            (0..n)
+                    let labels = py.allow_threads(move || {
+                        let (n, d) = view.dim();
+                        let ds = view.as_slice().expect("C-contiguous");
+                        let cs = centroids.as_slice().expect("C-contiguous");
+                        (0..n)
                                 .into_par_iter()
                                 .map(|i| {
                                     let point = &ds[i * d..(i + 1) * d];
@@ -1228,7 +1227,7 @@ mod python_bindings {
                                     idx as i64
                                 })
                                 .collect::<Vec<i64>>()
-                        });
+                    });
                     Ok(PyArray1::from_vec(py, labels))
                 }
                 MiniBatchFittedState::F32(state) => {
@@ -1243,12 +1242,11 @@ mod python_bindings {
                     validate_predict_data_generic(&view, expected_d)?;
                     let centroids = state.centroids.clone();
                     let k = self.n_clusters;
-                    let labels =
-                        py.allow_threads(move || {
-                            let (n, d) = view.dim();
-                            let ds = view.as_slice().expect("C-contiguous");
-                            let cs = centroids.as_slice().expect("C-contiguous");
-                            (0..n)
+                    let labels = py.allow_threads(move || {
+                        let (n, d) = view.dim();
+                        let ds = view.as_slice().expect("C-contiguous");
+                        let cs = centroids.as_slice().expect("C-contiguous");
+                        (0..n)
                                 .into_par_iter()
                                 .map(|i| {
                                     let point = &ds[i * d..(i + 1) * d];
@@ -1275,7 +1273,7 @@ mod python_bindings {
                                     idx as i64
                                 })
                                 .collect::<Vec<i64>>()
-                        });
+                    });
                     Ok(PyArray1::from_vec(py, labels))
                 }
             }

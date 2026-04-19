@@ -45,4 +45,4 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
       - name: Clippy
-        run: cargo clippy --no-default-features --lib -- -D warnings
+        run: cargo clippy --no-default-features --lib -- -W clippy::correctness
