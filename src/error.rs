@@ -58,6 +58,13 @@ pub enum ClusterError {
 
     #[error("cluster_selection_method must be \"eom\" or \"leaf\", got \"{0}\"")]
     InvalidClusterSelectionMethod(String),
+
+    // ---- Agglomerative ----
+    #[error("linkage must be \"ward\", \"complete\", \"average\", or \"single\", got \"{0}\"")]
+    InvalidLinkage(String),
+
+    #[error("Ward linkage requires euclidean metric")]
+    WardRequiresEuclidean,
 }
 
 #[cfg(feature = "python")]

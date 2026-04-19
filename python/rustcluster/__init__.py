@@ -6,6 +6,7 @@ from rustcluster._rustcluster import KMeans as _RustKMeans
 from rustcluster._rustcluster import MiniBatchKMeans as _RustMiniBatchKMeans
 from rustcluster._rustcluster import Dbscan as _RustDbscan
 from rustcluster._rustcluster import Hdbscan as _RustHdbscan
+from rustcluster._rustcluster import AgglomerativeClustering as _RustAgglomerative
 from rustcluster._rustcluster import (
     silhouette_score as _silhouette_score,
     calinski_harabasz_score as _calinski_harabasz_score,
@@ -17,6 +18,7 @@ __all__ = [
     "MiniBatchKMeans",
     "DBSCAN",
     "HDBSCAN",
+    "AgglomerativeClustering",
     "silhouette_score",
     "calinski_harabasz_score",
     "davies_bouldin_score",
@@ -414,6 +416,84 @@ class HDBSCAN:
             f"HDBSCAN(min_cluster_size={self._min_cluster_size}, "
             f"min_samples={self._min_samples}, metric=\"{self._metric}\", "
             f"cluster_selection_method=\"{self._cluster_selection_method}\")"
+        )
+
+
+class AgglomerativeClustering:
+    """Agglomerative (hierarchical) clustering backed by a Rust implementation.
+
+    Parameters
+    ----------
+    n_clusters : int, default=2
+        Number of clusters to find.
+    linkage : str, default="ward"
+        Linkage criterion: "ward", "complete", "average", or "single".
+        Ward requires euclidean metric.
+    metric : str, default="euclidean"
+        Distance metric: "euclidean", "cosine", or "manhattan".
+    """
+
+    def __init__(self, n_clusters=2, linkage="ward", metric="euclidean"):
+        self._model = _RustAgglomerative(
+            n_clusters=n_clusters, linkage=linkage, metric=metric,
+        )
+        self._n_clusters = n_clusters
+        self._linkage = linkage
+        self._metric = metric
+
+    def fit(self, X):
+        """Fit the model to data.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        self
+        """
+        X = _prepare_array(X)
+        self._model.fit(X)
+        return self
+
+    def fit_predict(self, X):
+        """Fit the model and return cluster labels.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,)
+        """
+        X = _prepare_array(X)
+        return self._model.fit_predict(X)
+
+    @property
+    def labels_(self):
+        """Cluster labels for the training data."""
+        return self._model.labels_
+
+    @property
+    def n_clusters_(self):
+        """Number of clusters found."""
+        return self._model.n_clusters_
+
+    @property
+    def children_(self):
+        """Merge history, shape (n_merges, 2)."""
+        return self._model.children_
+
+    @property
+    def distances_(self):
+        """Distance at each merge."""
+        return self._model.distances_
+
+    def __repr__(self):
+        return (
+            f"AgglomerativeClustering(n_clusters={self._n_clusters}, "
+            f"linkage=\"{self._linkage}\", metric=\"{self._metric}\")"
         )
 
 

@@ -1,3 +1,4 @@
+pub mod agglomerative;
 pub mod dbscan;
 pub mod distance;
 mod error;
@@ -555,6 +556,117 @@ mod python_bindings {
         }
     }
 
+    // ---- Agglomerative ----
+
+    use crate::agglomerative::{
+        run_agglomerative_with_metric, run_agglomerative_with_metric_f32,
+        AgglomerativeState, Linkage,
+    };
+
+    enum AgglomerativeFitted {
+        F64(AgglomerativeState<f64>),
+        F32(AgglomerativeState<f32>),
+    }
+
+    #[pyclass]
+    struct AgglomerativeClustering {
+        n_clusters: usize,
+        linkage: Linkage,
+        metric: Metric,
+        fitted: Option<AgglomerativeFitted>,
+    }
+
+    #[pymethods]
+    impl AgglomerativeClustering {
+        #[new]
+        #[pyo3(signature = (n_clusters=2, linkage="ward", metric="euclidean"))]
+        fn new(n_clusters: usize, linkage: &str, metric: &str) -> PyResult<Self> {
+            if n_clusters == 0 {
+                return Err(ClusterError::InvalidClusters { k: 0, n: 0 }.into());
+            }
+            let link = Linkage::from_str(linkage)?;
+            let met = Metric::from_str(metric)?;
+            if link == Linkage::Ward && met != Metric::Euclidean {
+                return Err(ClusterError::WardRequiresEuclidean.into());
+            }
+            Ok(AgglomerativeClustering { n_clusters, linkage: link, metric: met, fitted: None })
+        }
+
+        fn fit(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
+            let nc = self.n_clusters;
+            let link = self.linkage;
+            let metric = self.metric;
+
+            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
+                if !arr.is_c_contiguous() { return Err(ClusterError::NotContiguous.into()); }
+                let view = arr.as_array();
+                let state = py.allow_threads(move || run_agglomerative_with_metric(&view, nc, link, metric))?;
+                self.fitted = Some(AgglomerativeFitted::F64(state));
+                return Ok(());
+            }
+            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+                if !arr.is_c_contiguous() { return Err(ClusterError::NotContiguous.into()); }
+                let view = arr.as_array();
+                let state = py.allow_threads(move || run_agglomerative_with_metric_f32(&view, nc, link, metric))?;
+                self.fitted = Some(AgglomerativeFitted::F32(state));
+                return Ok(());
+            }
+            Err(pyo3::exceptions::PyValueError::new_err("Expected float32 or float64 array"))
+        }
+
+        fn fit_predict<'py>(&mut self, py: Python<'py>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<Bound<'py, PyArray1<i64>>> {
+            self.fit(py, x)?;
+            let labels = match self.fitted.as_ref().unwrap() {
+                AgglomerativeFitted::F64(s) => s.labels.clone(),
+                AgglomerativeFitted::F32(s) => s.labels.clone(),
+            };
+            Ok(PyArray1::from_vec(py, labels))
+        }
+
+        #[getter] fn labels_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
+            let labels = match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
+                AgglomerativeFitted::F64(s) => s.labels.clone(),
+                AgglomerativeFitted::F32(s) => s.labels.clone(),
+            };
+            Ok(PyArray1::from_vec(py, labels))
+        }
+
+        #[getter] fn n_clusters_(&self) -> PyResult<usize> {
+            match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
+                AgglomerativeFitted::F64(s) => Ok(s.n_clusters),
+                AgglomerativeFitted::F32(s) => Ok(s.n_clusters),
+            }
+        }
+
+        #[getter] fn children_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+            let children = match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
+                AgglomerativeFitted::F64(s) => &s.children,
+                AgglomerativeFitted::F32(s) => &s.children,
+            };
+            let n = children.len();
+            let mut arr = ndarray::Array2::<i64>::zeros((n, 2));
+            for (i, &(a, b)) in children.iter().enumerate() {
+                arr[[i, 0]] = a as i64;
+                arr[[i, 1]] = b as i64;
+            }
+            Ok(PyArray2::from_owned_array(py, arr))
+        }
+
+        #[getter] fn distances_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+            let dists = match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
+                AgglomerativeFitted::F64(s) => s.distances.clone(),
+                AgglomerativeFitted::F32(s) => s.distances.clone(),
+            };
+            Ok(PyArray1::from_vec(py, dists))
+        }
+
+        fn __repr__(&self) -> String {
+            let link_str = match self.linkage { Linkage::Ward => "ward", Linkage::Complete => "complete", Linkage::Average => "average", Linkage::Single => "single" };
+            let met_str = match self.metric { Metric::Euclidean => "euclidean", Metric::Cosine => "cosine", Metric::Manhattan => "manhattan" };
+            format!("AgglomerativeClustering(n_clusters={}, linkage=\"{}\", metric=\"{}\")", self.n_clusters, link_str, met_str)
+        }
+    }
+
     // ---- Mini-batch K-means ----
 
     use crate::minibatch_kmeans::{
@@ -828,6 +940,7 @@ mod python_bindings {
         m.add_class::<MiniBatchKMeans>()?;
         m.add_class::<Dbscan>()?;
         m.add_class::<Hdbscan>()?;
+        m.add_class::<AgglomerativeClustering>()?;
         m.add_function(wrap_pyfunction!(silhouette_score, m)?)?;
         m.add_function(wrap_pyfunction!(calinski_harabasz_score, m)?)?;
         m.add_function(wrap_pyfunction!(davies_bouldin_score, m)?)?;
