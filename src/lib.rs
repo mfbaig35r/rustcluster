@@ -1447,6 +1447,240 @@ mod python_bindings {
         }
     }
 
+    // ---- EmbeddingCluster (experimental) ----
+
+    use crate::embedding::{
+        evaluation, normalize, reduction, spherical_kmeans, vmf,
+    };
+
+    #[pyclass]
+    struct EmbeddingCluster {
+        n_clusters: usize,
+        reduction_dim: Option<usize>,
+        max_iter: usize,
+        tol: f64,
+        random_state: u64,
+        n_init: usize,
+        // Fitted state
+        labels: Option<Vec<usize>>,
+        centroids: Option<Vec<f64>>,  // flat, unit-norm, in reduced space
+        fitted_d: usize,              // dimensionality of fitted centroids
+        objective: Option<f64>,
+        n_iter: Option<usize>,
+        representatives: Option<Vec<usize>>,
+        intra_similarity: Option<Vec<f64>>,
+        resultant_lengths: Option<Vec<f64>>,
+        // vMF state
+        vmf_probabilities: Option<Vec<f64>>,
+        vmf_concentrations: Option<Vec<f64>>,
+        vmf_bic: Option<f64>,
+        // PCA projection for later use
+        pca_projection: Option<reduction::PcaProjection>,
+    }
+
+    #[pymethods]
+    impl EmbeddingCluster {
+        #[new]
+        #[pyo3(signature = (n_clusters=50, reduction_dim=Some(128), max_iter=100, tol=1e-6, random_state=0, n_init=5))]
+        fn new(n_clusters: usize, reduction_dim: Option<usize>, max_iter: usize, tol: f64, random_state: u64, n_init: usize) -> PyResult<Self> {
+            if n_clusters == 0 { return Err(ClusterError::InvalidClusters { k: 0, n: 0 }.into()); }
+            Ok(EmbeddingCluster {
+                n_clusters, reduction_dim, max_iter, tol, random_state, n_init,
+                labels: None, centroids: None, fitted_d: 0, objective: None, n_iter: None,
+                representatives: None, intra_similarity: None, resultant_lengths: None,
+                vmf_probabilities: None, vmf_concentrations: None, vmf_bic: None,
+                pca_projection: None,
+            })
+        }
+
+        fn fit(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
+            // Extract as f32 first (primary for embeddings), then f64
+            let (data_f64, n, d) = if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+                let view = arr.as_array();
+                let (n, d) = view.dim();
+                let data: Vec<f64> = view.as_slice().expect("contiguous").iter().map(|&v| v as f64).collect();
+                (data, n, d)
+            } else if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
+                let view = arr.as_array();
+                let (n, d) = view.dim();
+                let data: Vec<f64> = view.as_slice().expect("contiguous").to_vec();
+                (data, n, d)
+            } else {
+                return Err(pyo3::exceptions::PyValueError::new_err("Expected float32 or float64 array"));
+            };
+
+            let k = self.n_clusters;
+            let max_iter = self.max_iter;
+            let tol = self.tol;
+            let seed = self.random_state;
+            let n_init = self.n_init;
+            let reduction_dim = self.reduction_dim;
+
+            let result = py.allow_threads(move || -> Result<_, ClusterError> {
+                // Step 1: L2 normalize
+                let mut data = data_f64;
+                normalize::l2_normalize_rows_inplace(&mut data, n, d);
+
+                // Step 2: Optional PCA
+                let (work_data, work_d, pca_proj) = if let Some(target) = reduction_dim {
+                    if target < d {
+                        let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed);
+                        let proj = reduction::compute_pca(&data, n, d, target, 10, &mut rng);
+                        let projected = reduction::project_data::<f64>(&data, n, &proj);
+                        // Re-normalize after PCA
+                        let mut proj_data = projected;
+                        normalize::l2_normalize_rows_inplace(&mut proj_data, n, proj.output_dim);
+                        (proj_data, proj.output_dim, Some(proj))
+                    } else {
+                        (data, d, None)
+                    }
+                } else {
+                    (data, d, None)
+                };
+
+                // Step 3: Spherical K-means
+                let skmeans = spherical_kmeans::run_spherical_kmeans(
+                    &work_data, n, work_d, k, max_iter, tol, seed, n_init,
+                )?;
+
+                let centroids_flat = skmeans.centroids.as_slice().unwrap().to_vec();
+
+                // Step 4: Evaluation
+                let reps = evaluation::find_representatives(&work_data, &skmeans.labels, &centroids_flat, n, work_d, k);
+                let intra_sim = evaluation::intra_cluster_similarity(&work_data, &skmeans.labels, &centroids_flat, n, work_d, k);
+                let res_lens = evaluation::resultant_lengths(&work_data, &skmeans.labels, n, work_d, k);
+
+                Ok((skmeans.labels, centroids_flat, work_d, skmeans.objective, skmeans.n_iter, reps, intra_sim, res_lens, pca_proj))
+            })?;
+
+            let (labels, centroids, work_d, objective, n_iter, reps, intra_sim, res_lens, pca_proj) = result;
+            self.labels = Some(labels);
+            self.centroids = Some(centroids);
+            self.fitted_d = work_d;
+            self.objective = Some(objective);
+            self.n_iter = Some(n_iter);
+            self.representatives = Some(reps);
+            self.intra_similarity = Some(intra_sim);
+            self.resultant_lengths = Some(res_lens);
+            self.pca_projection = pca_proj;
+            self.vmf_probabilities = None;
+            self.vmf_concentrations = None;
+            self.vmf_bic = None;
+            Ok(())
+        }
+
+        fn refine_vmf(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
+            let labels = self.labels.as_ref().ok_or(ClusterError::NotFitted)?;
+            let centroids = self.centroids.as_ref().ok_or(ClusterError::NotFitted)?;
+
+            // Need the working data again — extract and process
+            let (data_f64, n, d) = if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+                let view = arr.as_array();
+                let (n, d) = view.dim();
+                (view.as_slice().expect("contiguous").iter().map(|&v| v as f64).collect::<Vec<_>>(), n, d)
+            } else if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
+                let view = arr.as_array();
+                let (n, d) = view.dim();
+                (view.as_slice().expect("contiguous").to_vec(), n, d)
+            } else {
+                return Err(pyo3::exceptions::PyValueError::new_err("Expected float32 or float64 array"));
+            };
+
+            let k = self.n_clusters;
+            let work_d = self.fitted_d;
+            let labels_clone = labels.clone();
+            let centroids_clone = centroids.clone();
+            let pca_proj = self.pca_projection.take();
+
+            let vmf_result = py.allow_threads(move || {
+                let mut data = data_f64;
+                normalize::l2_normalize_rows_inplace(&mut data, n, d);
+
+                let work_data = if let Some(ref proj) = pca_proj {
+                    let projected = reduction::project_data::<f64>(&data, n, proj);
+                    let mut proj_data = projected;
+                    normalize::l2_normalize_rows_inplace(&mut proj_data, n, work_d);
+                    proj_data
+                } else {
+                    data
+                };
+
+                let vmf_state = vmf::fit_vmf(&work_data, n, work_d, k, &centroids_clone, &labels_clone, 50, 1e-6);
+                (vmf_state, pca_proj)
+            });
+
+            let (vmf_state, pca_proj) = vmf_result;
+            self.pca_projection = pca_proj;
+            self.vmf_probabilities = Some(vmf_state.responsibilities);
+            self.vmf_concentrations = Some(vmf_state.concentrations);
+            self.vmf_bic = Some(vmf_state.bic);
+            Ok(())
+        }
+
+        #[getter] fn labels_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
+            let labels = self.labels.as_ref().ok_or(ClusterError::NotFitted)?;
+            Ok(PyArray1::from_vec(py, labels.iter().map(|&l| l as i64).collect()))
+        }
+
+        #[getter] fn cluster_centers_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+            let centroids = self.centroids.as_ref().ok_or(ClusterError::NotFitted)?;
+            let arr = ndarray::Array2::from_shape_vec((self.n_clusters, self.fitted_d), centroids.clone())
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            Ok(PyArray2::from_owned_array(py, arr))
+        }
+
+        #[getter] fn objective_(&self) -> PyResult<f64> {
+            self.objective.ok_or_else(|| ClusterError::NotFitted.into())
+        }
+
+        #[getter] fn n_iter_(&self) -> PyResult<usize> {
+            self.n_iter.ok_or_else(|| ClusterError::NotFitted.into())
+        }
+
+        #[getter] fn representatives_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
+            let reps = self.representatives.as_ref().ok_or(ClusterError::NotFitted)?;
+            Ok(PyArray1::from_vec(py, reps.iter().map(|&r| r as i64).collect()))
+        }
+
+        #[getter] fn intra_similarity_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+            let sims = self.intra_similarity.as_ref().ok_or(ClusterError::NotFitted)?;
+            Ok(PyArray1::from_vec(py, sims.clone()))
+        }
+
+        #[getter] fn resultant_lengths_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+            let rl = self.resultant_lengths.as_ref().ok_or(ClusterError::NotFitted)?;
+            Ok(PyArray1::from_vec(py, rl.clone()))
+        }
+
+        #[getter] fn probabilities_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+            let probs = self.vmf_probabilities.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Call refine_vmf() first")
+            })?;
+            let n = probs.len() / self.n_clusters;
+            let arr = ndarray::Array2::from_shape_vec((n, self.n_clusters), probs.clone())
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            Ok(PyArray2::from_owned_array(py, arr))
+        }
+
+        #[getter] fn concentrations_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+            let conc = self.vmf_concentrations.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Call refine_vmf() first")
+            })?;
+            Ok(PyArray1::from_vec(py, conc.clone()))
+        }
+
+        #[getter] fn bic_(&self) -> PyResult<f64> {
+            self.vmf_bic.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call refine_vmf() first").into())
+        }
+
+        fn __repr__(&self) -> String {
+            format!(
+                "EmbeddingCluster(n_clusters={}, reduction_dim={:?}, max_iter={}, n_init={})",
+                self.n_clusters, self.reduction_dim, self.max_iter, self.n_init
+            )
+        }
+    }
+
     // ---- Metrics ----
 
     #[pyfunction]
@@ -1525,6 +1759,7 @@ mod python_bindings {
         m.add_class::<Dbscan>()?;
         m.add_class::<Hdbscan>()?;
         m.add_class::<AgglomerativeClustering>()?;
+        m.add_class::<EmbeddingCluster>()?;
         m.add_function(wrap_pyfunction!(silhouette_score, m)?)?;
         m.add_function(wrap_pyfunction!(calinski_harabasz_score, m)?)?;
         m.add_function(wrap_pyfunction!(davies_bouldin_score, m)?)?;
