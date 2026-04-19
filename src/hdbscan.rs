@@ -18,7 +18,7 @@
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 
-use crate::distance::{CosineDistance, Distance, Metric, Scalar, SquaredEuclidean};
+use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
 use crate::error::ClusterError;
 use crate::utils::validate_data_generic;
 
@@ -60,6 +60,7 @@ pub fn run_hdbscan_with_metric(
     match metric {
         Metric::Euclidean => run_hdbscan_generic::<f64, SquaredEuclidean>(data, min_cluster_size, min_samples, selection),
         Metric::Cosine => run_hdbscan_generic::<f64, CosineDistance>(data, min_cluster_size, min_samples, selection),
+        Metric::Manhattan => run_hdbscan_generic::<f64, ManhattanDistance>(data, min_cluster_size, min_samples, selection),
     }
 }
 
@@ -73,6 +74,7 @@ pub fn run_hdbscan_with_metric_f32(
     match metric {
         Metric::Euclidean => run_hdbscan_generic::<f32, SquaredEuclidean>(data, min_cluster_size, min_samples, selection),
         Metric::Cosine => run_hdbscan_generic::<f32, CosineDistance>(data, min_cluster_size, min_samples, selection),
+        Metric::Manhattan => run_hdbscan_generic::<f32, ManhattanDistance>(data, min_cluster_size, min_samples, selection),
     }
 }
 
@@ -160,7 +162,7 @@ fn compute_core_distances<F: Scalar, D: Distance<F>>(
                     if i == j {
                         0.0
                     } else {
-                        D::distance(point_i, &data_slice[j * d..(j + 1) * d]).to_f64_lossy().sqrt()
+                        D::to_metric(D::distance(point_i, &data_slice[j * d..(j + 1) * d]).to_f64_lossy())
                     }
                 })
                 .collect();
@@ -199,7 +201,7 @@ fn build_mst<F: Scalar, D: Distance<F>>(
     let point_0 = &data_slice[0..d];
     for j in 1..n {
         let point_j = &data_slice[j * d..(j + 1) * d];
-        let raw_dist = D::distance(point_0, point_j).to_f64_lossy().sqrt();
+        let raw_dist = D::to_metric(D::distance(point_0, point_j).to_f64_lossy());
         let mrd = raw_dist.max(core_dists[0]).max(core_dists[j]);
         min_weight[j] = mrd;
         min_from[j] = 0;
@@ -224,7 +226,7 @@ fn build_mst<F: Scalar, D: Distance<F>>(
         for j in 0..n {
             if !in_tree[j] {
                 let point_j = &data_slice[j * d..(j + 1) * d];
-                let raw_dist = D::distance(point_best, point_j).to_f64_lossy().sqrt();
+                let raw_dist = D::to_metric(D::distance(point_best, point_j).to_f64_lossy());
                 let mrd = raw_dist.max(core_dists[best_node]).max(core_dists[j]);
                 if mrd < min_weight[j] {
                     min_weight[j] = mrd;

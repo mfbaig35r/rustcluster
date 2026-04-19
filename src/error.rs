@@ -42,7 +42,7 @@ pub enum ClusterError {
     #[error("min_samples must be >= 1, got {0}")]
     InvalidMinSamples(usize),
 
-    #[error("Unknown metric '{0}' — use \"euclidean\" or \"cosine\"")]
+    #[error("Unknown metric '{0}' — use \"euclidean\", \"cosine\", or \"manhattan\"")]
     InvalidMetric(String),
 
     // ---- Mini-batch K-means ----

@@ -5,7 +5,7 @@ use rand_distr::WeightedIndex;
 use rand_distr::Distribution;
 use rayon::prelude::*;
 
-use crate::distance::{CosineDistance, Distance, Metric, Scalar, SquaredEuclidean};
+use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
 use crate::error::ClusterError;
 use crate::utils::{assign_nearest_with, validate_data_generic};
 
@@ -94,6 +94,7 @@ pub fn run_kmeans_with_metric(
     match metric {
         Metric::Euclidean => run_kmeans_n_init_generic::<f64, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo),
         Metric::Cosine => run_kmeans_n_init_generic::<f64, CosineDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
+        Metric::Manhattan => run_kmeans_n_init_generic::<f64, ManhattanDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
     }
 }
 
@@ -111,6 +112,7 @@ pub fn run_kmeans_with_metric_f32(
     match metric {
         Metric::Euclidean => run_kmeans_n_init_generic::<f32, SquaredEuclidean>(data, k, max_iter, tol, seed, n_init, algo),
         Metric::Cosine => run_kmeans_n_init_generic::<f32, CosineDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
+        Metric::Manhattan => run_kmeans_n_init_generic::<f32, ManhattanDistance>(data, k, max_iter, tol, seed, n_init, Algorithm::Lloyd),
     }
 }
 

@@ -128,7 +128,7 @@ class TestParameters:
 
     def test_invalid_metric_raises(self):
         with pytest.raises(ValueError, match="metric"):
-            HDBSCAN(metric="manhattan")
+            HDBSCAN(metric="hamming")
 
 
 class TestValidation:

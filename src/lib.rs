@@ -11,7 +11,7 @@ pub mod utils;
 /// Re-exports for Criterion benchmarks.
 #[doc(hidden)]
 pub mod _bench_api {
-    pub use crate::distance::{CosineDistance, Distance, Metric, Scalar, SquaredEuclidean};
+    pub use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
     pub use crate::kmeans::{kmeans_plus_plus_init, run_kmeans_n_init, Algorithm};
     pub use crate::utils::{assign_nearest, assign_nearest_two, squared_euclidean};
 }
@@ -172,6 +172,12 @@ mod python_bindings {
                                     >(
                                         point, centroids_slice, k, d
                                     ),
+                                    Metric::Manhattan => assign_nearest_with::<
+                                        f64,
+                                        crate::distance::ManhattanDistance,
+                                    >(
+                                        point, centroids_slice, k, d
+                                    ),
                                 };
                                 idx as i64
                             })
@@ -215,6 +221,12 @@ mod python_bindings {
                                     Metric::Cosine => assign_nearest_with::<
                                         f32,
                                         crate::distance::CosineDistance,
+                                    >(
+                                        point, centroids_slice, k, d
+                                    ),
+                                    Metric::Manhattan => assign_nearest_with::<
+                                        f32,
+                                        crate::distance::ManhattanDistance,
                                     >(
                                         point, centroids_slice, k, d
                                     ),
@@ -287,6 +299,7 @@ mod python_bindings {
             let met_str = match self.metric {
                 Metric::Euclidean => "euclidean",
                 Metric::Cosine => "cosine",
+                Metric::Manhattan => "manhattan",
             };
             format!(
                 "KMeans(n_clusters={}, max_iter={}, tol={}, random_state={}, n_init={}, algorithm=\"{}\", metric=\"{}\")",
@@ -417,6 +430,7 @@ mod python_bindings {
             let met_str = match self.metric {
                 Metric::Euclidean => "euclidean",
                 Metric::Cosine => "cosine",
+                Metric::Manhattan => "manhattan",
             };
             format!(
                 "DBSCAN(eps={}, min_samples={}, metric=\"{}\")",
@@ -532,7 +546,7 @@ mod python_bindings {
         }
 
         fn __repr__(&self) -> String {
-            let met_str = match self.metric { Metric::Euclidean => "euclidean", Metric::Cosine => "cosine" };
+            let met_str = match self.metric { Metric::Euclidean => "euclidean", Metric::Cosine => "cosine", Metric::Manhattan => "manhattan" };
             let sel_str = match self.cluster_selection_method { ClusterSelectionMethod::Eom => "eom", ClusterSelectionMethod::Leaf => "leaf" };
             format!(
                 "HDBSCAN(min_cluster_size={}, min_samples={}, metric=\"{}\", cluster_selection_method=\"{}\")",
@@ -655,6 +669,7 @@ mod python_bindings {
                             let (idx, _) = match metric {
                                 Metric::Euclidean => assign_nearest_with::<f64, crate::distance::SquaredEuclidean>(point, cs, k, d),
                                 Metric::Cosine => assign_nearest_with::<f64, crate::distance::CosineDistance>(point, cs, k, d),
+                                Metric::Manhattan => assign_nearest_with::<f64, crate::distance::ManhattanDistance>(point, cs, k, d),
                             };
                             idx as i64
                         }).collect::<Vec<i64>>()
@@ -679,6 +694,7 @@ mod python_bindings {
                             let (idx, _) = match metric {
                                 Metric::Euclidean => assign_nearest_with::<f32, crate::distance::SquaredEuclidean>(point, cs, k, d),
                                 Metric::Cosine => assign_nearest_with::<f32, crate::distance::CosineDistance>(point, cs, k, d),
+                                Metric::Manhattan => assign_nearest_with::<f32, crate::distance::ManhattanDistance>(point, cs, k, d),
                             };
                             idx as i64
                         }).collect::<Vec<i64>>()
@@ -727,7 +743,7 @@ mod python_bindings {
         }
 
         fn __repr__(&self) -> String {
-            let met_str = match self.metric { Metric::Euclidean => "euclidean", Metric::Cosine => "cosine" };
+            let met_str = match self.metric { Metric::Euclidean => "euclidean", Metric::Cosine => "cosine", Metric::Manhattan => "manhattan" };
             format!(
                 "MiniBatchKMeans(n_clusters={}, batch_size={}, max_iter={}, tol={}, random_state={}, max_no_improvement={}, metric=\"{}\")",
                 self.n_clusters, self.batch_size, self.max_iter, self.tol, self.random_state, self.max_no_improvement, met_str

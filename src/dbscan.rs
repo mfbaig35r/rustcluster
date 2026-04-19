@@ -11,7 +11,7 @@ use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
-use crate::distance::{CosineDistance, Distance, Metric, Scalar, SquaredEuclidean};
+use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
 use crate::error::ClusterError;
 use crate::utils::validate_data_generic;
 
@@ -61,6 +61,7 @@ pub fn run_dbscan_with_metric(
     match metric {
         Metric::Euclidean => run_dbscan_generic::<f64, SquaredEuclidean>(data, eps * eps, min_samples),
         Metric::Cosine => run_dbscan_generic::<f64, CosineDistance>(data, eps, min_samples),
+        Metric::Manhattan => run_dbscan_generic::<f64, ManhattanDistance>(data, eps, min_samples),
     }
 }
 
@@ -77,6 +78,7 @@ pub fn run_dbscan_with_metric_f32(
     match metric {
         Metric::Euclidean => run_dbscan_generic::<f32, SquaredEuclidean>(data, eps * eps, min_samples),
         Metric::Cosine => run_dbscan_generic::<f32, CosineDistance>(data, eps, min_samples),
+        Metric::Manhattan => run_dbscan_generic::<f32, ManhattanDistance>(data, eps, min_samples),
     }
 }
 

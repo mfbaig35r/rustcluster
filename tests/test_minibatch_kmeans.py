@@ -101,7 +101,7 @@ class TestValidation:
 
     def test_invalid_metric_raises(self):
         with pytest.raises(ValueError, match="metric"):
-            MiniBatchKMeans(n_clusters=2, metric="manhattan")
+            MiniBatchKMeans(n_clusters=2, metric="hamming")
 
     def test_empty_input_raises(self):
         model = MiniBatchKMeans(n_clusters=2)

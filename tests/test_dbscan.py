@@ -181,7 +181,7 @@ class TestValidation:
 
     def test_invalid_metric(self):
         with pytest.raises(ValueError, match="metric"):
-            DBSCAN(metric="manhattan")
+            DBSCAN(metric="hamming")
 
     def test_empty_input(self):
         model = DBSCAN()

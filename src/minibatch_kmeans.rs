@@ -12,7 +12,7 @@ use rand::seq::index::sample;
 use rand::SeedableRng;
 use rayon::prelude::*;
 
-use crate::distance::{CosineDistance, Distance, Metric, Scalar, SquaredEuclidean};
+use crate::distance::{CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean};
 use crate::error::ClusterError;
 use crate::kmeans::kmeans_plus_plus_init;
 use crate::utils::{assign_nearest_with, validate_data_generic};
@@ -45,6 +45,9 @@ pub fn run_minibatch_kmeans_with_metric(
         Metric::Cosine => run_minibatch_generic::<f64, CosineDistance>(
             data, k, batch_size, max_iter, tol, seed, max_no_improvement,
         ),
+        Metric::Manhattan => run_minibatch_generic::<f64, ManhattanDistance>(
+            data, k, batch_size, max_iter, tol, seed, max_no_improvement,
+        ),
     }
 }
 
@@ -64,6 +67,9 @@ pub fn run_minibatch_kmeans_with_metric_f32(
             data, k, batch_size, max_iter, tol, seed, max_no_improvement,
         ),
         Metric::Cosine => run_minibatch_generic::<f32, CosineDistance>(
+            data, k, batch_size, max_iter, tol, seed, max_no_improvement,
+        ),
+        Metric::Manhattan => run_minibatch_generic::<f32, ManhattanDistance>(
             data, k, batch_size, max_iter, tol, seed, max_no_improvement,
         ),
     }

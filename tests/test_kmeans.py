@@ -453,4 +453,4 @@ class TestCosineKMeans:
 
     def test_invalid_metric(self):
         with pytest.raises(ValueError, match="metric"):
-            KMeans(n_clusters=2, metric="manhattan")
+            KMeans(n_clusters=2, metric="hamming")
