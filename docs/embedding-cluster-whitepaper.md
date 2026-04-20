@@ -1,14 +1,14 @@
 # EmbeddingCluster: A Unified Pipeline for Fast Spherical Clustering of Dense Vector Embeddings
 
-**Abstract.** We present EmbeddingCluster, an integrated clustering system designed for dense vector embeddings produced by modern neural language models. The system implements a geometrically principled pipeline — L2 normalization, linear dimensionality reduction via randomized SVD, spherical K-means with centroid re-normalization, and optional von Mises-Fisher mixture refinement — as a single compiled Rust kernel exposed through a Python API. By aligning every stage of the pipeline with the cosine geometry natural to embedding spaces, the system avoids the objective misalignment introduced by applying Euclidean clustering to directional data. On synthetic benchmarks at the 5,000-embedding scale, the system achieves perfect cluster recovery in under 200 milliseconds without dimensionality reduction, and maintains 99.9% purity with reduction from 1,536 to 32 dimensions. The full pipeline — including soft probabilistic assignments via vMF mixture modeling — completes in under 5 seconds for 5,000 embeddings at 1,536 dimensions. The system requires no external linear algebra dependencies and runs entirely in user-space Rust with zero-copy NumPy interop.
+**Abstract.** We present EmbeddingCluster, an integrated clustering system designed for dense vector embeddings produced by modern neural language models. The system implements a geometrically principled pipeline (L2 normalization, linear dimensionality reduction via randomized SVD, spherical K-means with centroid re-normalization, and optional von Mises-Fisher mixture refinement) as a single compiled Rust kernel exposed through a Python API. By aligning every stage of the pipeline with the cosine geometry natural to embedding spaces, the system avoids the objective misalignment introduced by applying Euclidean clustering to directional data. On synthetic benchmarks at the 5,000-embedding scale, the system achieves perfect cluster recovery in under 200 milliseconds without dimensionality reduction, and maintains 99.9% purity with reduction from 1,536 to 32 dimensions. The full pipeline, including soft probabilistic assignments via vMF mixture modeling, completes in under 5 seconds for 5,000 embeddings at 1,536 dimensions. The system requires no external linear algebra dependencies and runs entirely in user-space Rust with zero-copy NumPy interop.
 
 ---
 
 ## 1. Introduction
 
-The rapid adoption of dense vector embeddings from large language models — OpenAI's text-embedding-3 family (1,536 dimensions), Cohere's embed-v3 (1,024 dimensions), and comparable systems from Voyage, Jina, and others — has created a practical need for clustering algorithms that operate natively in the geometry these embeddings occupy. The standard approach in current tooling is to treat embeddings as generic numerical vectors and apply Euclidean clustering (scikit-learn's KMeans) or density-based methods (HDBSCAN, often preceded by UMAP). This approach works but introduces a systematic mismatch: the embeddings are L2-normalized or near-normalized, their semantic similarity is measured by cosine similarity, and their meaningful variation lives on a hypersphere rather than in Euclidean space.
+The rapid adoption of dense vector embeddings from large language models (OpenAI's text-embedding-3 family, 1,536 dimensions; Cohere's embed-v3, 1,024 dimensions; and comparable systems from Voyage, Jina, and others) has created a practical need for clustering algorithms that operate natively in the geometry these embeddings occupy. The standard approach in current tooling is to treat embeddings as generic numerical vectors and apply Euclidean clustering (scikit-learn's KMeans) or density-based methods (HDBSCAN, often preceded by UMAP). This approach works but introduces a systematic mismatch: the embeddings are L2-normalized or near-normalized, their semantic similarity is measured by cosine similarity, and their meaningful variation lives on a hypersphere rather than in Euclidean space.
 
-The practical consequences of this mismatch are well-documented in the directional statistics literature but underappreciated in the applied NLP community. Euclidean K-means on normalized data optimizes an objective that conflates centroid norm with cluster assignment priority [1]. UMAP preprocessing, while effective at creating low-dimensional representations for visualization and density estimation, introduces stochastic artifacts, does not preserve density, and can create "false tears" that split coherent semantic groups [2]. The BERTopic pipeline [3], which chains UMAP dimensionality reduction with HDBSCAN clustering and c-TF-IDF topic representation, is powerful for topic modeling but imposes substantial computational overhead — particularly the O(n²) UMAP graph construction and the stochastic nature of its manifold projection.
+The practical consequences of this mismatch are well-documented in the directional statistics literature but underappreciated in the applied NLP community. Euclidean K-means on normalized data optimizes an objective that conflates centroid norm with cluster assignment priority [1]. UMAP preprocessing, while effective at creating low-dimensional representations for visualization and density estimation, introduces stochastic artifacts, does not preserve density, and can create "false tears" that split coherent semantic groups [2]. The BERTopic pipeline [3], which chains UMAP dimensionality reduction with HDBSCAN clustering and c-TF-IDF topic representation, is powerful for topic modeling but imposes substantial computational overhead, particularly the O(n²) UMAP graph construction and the stochastic nature of its manifold projection.
 
 We argue that for the specific and increasingly common task of *clustering embeddings for topic discovery and document organization*, a simpler and faster approach is available: one that respects the spherical geometry from input to output, operates entirely in compiled code, and provides both hard and soft cluster assignments without requiring manifold learning as a preprocessing step.
 
@@ -16,13 +16,13 @@ We argue that for the specific and increasingly common task of *clustering embed
 
 This paper describes the design and implementation of EmbeddingCluster, a clustering system for dense embedding vectors with the following properties:
 
-1. **Geometric alignment.** Every stage of the pipeline — normalization, reduction, assignment, centroid update, and probabilistic refinement — operates on or produces unit-norm vectors, preserving cosine geometry throughout.
+1. **Geometric alignment.** Every stage of the pipeline (normalization, reduction, assignment, centroid update, and probabilistic refinement) operates on or produces unit-norm vectors, preserving cosine geometry throughout.
 
 2. **Integrated dimensionality reduction.** A randomized PCA step reduces embedding dimensionality (e.g., 1,536 → 128) before clustering, implemented entirely in Rust without external BLAS/LAPACK dependencies. Post-reduction re-normalization ensures the data remains on the unit hypersphere.
 
 3. **Correct spherical objective.** The clustering stage uses exact spherical K-means [1], which re-normalizes centroids after each update step to remain on the unit sphere. This is mathematically distinct from Euclidean K-means with cosine distance, which allows centroid norms to vary and introduces an uncontrolled degree of freedom into the assignment function.
 
-4. **Probabilistic refinement.** An optional von Mises-Fisher (vMF) mixture model [4] refines the hard clustering into soft posterior probabilities per point per cluster, estimates per-cluster concentration parameters κ, and provides a Bayesian Information Criterion score for model selection — all computed in log-space to maintain numerical stability at d > 100.
+4. **Probabilistic refinement.** An optional von Mises-Fisher (vMF) mixture model [4] refines the hard clustering into soft posterior probabilities per point per cluster, estimates per-cluster concentration parameters κ, and provides a Bayesian Information Criterion score for model selection, all computed in log-space to maintain numerical stability at d > 100.
 
 5. **Systems-level efficiency.** The implementation is a compiled Rust library with zero-copy NumPy interop via PyO3, f32-native processing, GIL release during all computation, and LLVM auto-vectorized inner loops. The system requires no GPU and no external linear algebra library.
 
@@ -38,7 +38,7 @@ For unit-norm vectors x and y:
 
 $$\text{cosine\_similarity}(x, y) = x^\top y = 1 - \frac{1}{2}\|x - y\|_2^2$$
 
-This identity means that on the unit sphere, maximizing cosine similarity is equivalent to minimizing squared Euclidean distance. However, this equivalence holds *only* when both the data points and the cluster centers remain on the sphere — a constraint that standard Euclidean K-means does not enforce on its centroids.
+This identity means that on the unit sphere, maximizing cosine similarity is equivalent to minimizing squared Euclidean distance. However, this equivalence holds *only* when both the data points and the cluster centers remain on the sphere, a constraint that standard Euclidean K-means does not enforce on its centroids.
 
 ### 2.2 The Centroid Normalization Problem
 
@@ -68,7 +68,7 @@ Modern embedding models produce vectors with 768–3,072 dimensions, but the eff
 
 The choice of reduction method matters. UMAP [6] is widely used (it is the default in BERTopic [3]) but has properties that make it suboptimal as a clustering preprocessor: it is stochastic (different runs produce different embeddings), it does not preserve density (the UMAP documentation explicitly warns of this), and it can create topological artifacts that split coherent groups. These properties are acceptable for visualization but problematic for deterministic, reproducible clustering.
 
-Linear methods — PCA and random projection — preserve the inner-product structure of the embedding space and are fully deterministic. Randomized PCA [7] computes an approximate truncated SVD in O(n·d·k) time (where k is the target dimensionality), much faster than the O(n·d·min(n,d)) cost of full SVD. For embedding clustering, linear reduction followed by re-normalization maintains the cosine geometry while dramatically reducing the per-point cost of the clustering step.
+Linear methods (PCA and random projection) preserve the inner-product structure of the embedding space and are fully deterministic. Randomized PCA [7] computes an approximate truncated SVD in O(n·d·k) time (where k is the target dimensionality), much faster than the O(n·d·min(n,d)) cost of full SVD. For embedding clustering, linear reduction followed by re-normalization maintains the cosine geometry while dramatically reducing the per-point cost of the clustering step.
 
 ### 2.4 Soft Clustering via von Mises-Fisher Mixtures
 
@@ -120,11 +120,11 @@ The implementation follows a three-layer separation of concerns:
 
 **Layer 2 (Algorithm logic):** Pure Rust functions implement the pipeline stages using ndarray types for array manipulation. This layer manages iteration, convergence checking, and inter-stage data flow.
 
-**Layer 3 (Hot kernels):** The innermost numerical kernels — dot products, centroid accumulation, normalization — operate on raw `&[f32]` or `&[f64]` slices. These tight counted loops are structured for LLVM auto-vectorization, producing SIMD instructions (AVX2 on x86, NEON on ARM) without any `unsafe` code or manual intrinsics.
+**Layer 3 (Hot kernels):** The innermost numerical kernels (dot products, centroid accumulation, normalization) operate on raw `&[f32]` or `&[f64]` slices. These tight counted loops are structured for LLVM auto-vectorization, producing SIMD instructions (AVX2 on x86, NEON on ARM) without any `unsafe` code or manual intrinsics.
 
 ### 3.3 Randomized PCA Without External Dependencies
 
-A key design decision is implementing randomized PCA entirely in Rust without depending on BLAS, LAPACK, faer, or any external linear algebra library. The Halko-Martinsson-Tropp algorithm [7] is decomposed into primitive operations — matrix-matrix multiplication, QR factorization, and eigendecomposition of a small symmetric matrix — each implemented on flat row-major slices.
+A key design decision is implementing randomized PCA entirely in Rust without depending on BLAS, LAPACK, faer, or any external linear algebra library. The Halko-Martinsson-Tropp algorithm [7] is decomposed into primitive operations (matrix-matrix multiplication, QR factorization, and eigendecomposition of a small symmetric matrix), each implemented on flat row-major slices.
 
 **Matrix multiply (Y = X·Ω):** The dominant cost, O(n·d·k). Parallelized over row blocks using rayon, each thread processing ~1000 rows for L2-cache-friendly access.
 
@@ -154,7 +154,7 @@ fn dot_product<F: Scalar>(a: &[F], b: &[F]) -> F {
 
 **Convergence criterion:** Angular shift between old and new centroids, computed as 1 - dot(μ_old, μ_new). This is monotonic with the actual angular displacement for centroids that remain in the same hemisphere (which they always do in practice).
 
-**Initialization:** Spherical K-means++ [8], adapted for cosine geometry. The D² weighting uses (1 - max_dot_to_chosen_centers) as the distance measure. Research indicates that the advantage of K-means++ over uniform random initialization is not universal for spherical clustering — on some corpora, K-means++ performs 7–8% *worse* than random due to outlier sensitivity [9]. We therefore support both strategies.
+**Initialization:** Spherical K-means++ [8], adapted for cosine geometry. The D² weighting uses (1 - max_dot_to_chosen_centers) as the distance measure. Research indicates that the advantage of K-means++ over uniform random initialization is not universal for spherical clustering: on some corpora, K-means++ performs 7–8% *worse* than random due to outlier sensitivity [9]. We therefore support both strategies.
 
 ### 3.5 Numerically Stable vMF Mixture Estimation
 
@@ -248,7 +248,7 @@ We compare embedding A (description only, ~30-80 tokens) against embedding B (de
 | A (description only) | 0.5864 | 0.5384 | 673s |
 | B (desc + materials + use) | 0.5995 | 0.5477 | 651s |
 
-Adding materials and product use provides a measurable but marginal improvement: +1.3% purity and +0.9% NMI. This suggests that modern embedding models implicitly extract material composition and intended use information from product descriptions — "liquid diet shake drinks containing skimmed milk powder" already encodes both the materials (milk powder) and use (diet drink). For practical applications, embedding the description alone is sufficient; the ~2x token cost of the richer text is not justified by the marginal quality improvement.
+Adding materials and product use provides a measurable but marginal improvement: +1.3% purity and +0.9% NMI. This suggests that modern embedding models implicitly extract material composition and intended use information from product descriptions: "liquid diet shake drinks containing skimmed milk powder" already encodes both the materials (milk powder) and use (diet drink). For practical applications, embedding the description alone is sufficient; the ~2x token cost of the richer text is not justified by the marginal quality improvement.
 
 ### 5.4 Experiment 3: Dimensionality Reduction Ablation
 
@@ -261,7 +261,7 @@ We sweep the PCA target dimensionality to find the quality/speed tradeoff.
 | 128 | 0.5864 | 0.5384 | 627s | 2.3x |
 | 256 | 0.5985 | 0.5407 | 1427s | 1.0x |
 
-Quality improves monotonically with more PCA dimensions, but with diminishing returns. The 128→256 transition gains only 1.2% purity at 2.3x the cost — the clearest inflection point. We recommend 128 dimensions as the default. For latency-sensitive applications, 32 dimensions retains 92.6% of the quality of 256 at 8x speed.
+Quality improves monotonically with more PCA dimensions, but with diminishing returns. The 128→256 transition gains only 1.2% purity at 2.3x the cost, which is the clearest inflection point. We recommend 128 dimensions as the default. For latency-sensitive applications, 32 dimensions retains 92.6% of the quality of 256 at 8x speed.
 
 ### 5.5 Experiment 4: Comparison Against scikit-learn
 
@@ -276,7 +276,7 @@ We compare EmbeddingCluster against scikit-learn's KMeans on a 50,000-sample sub
 
 At 50K samples, sklearn's BLAS-accelerated distance computation on raw 1536d data is competitive. sklearn on normalized data (pseudo-cosine clustering without centroid re-normalization) slightly outperforms EmbeddingCluster's PCA→128 configuration by 1.0% purity. This gap is attributable to information loss from PCA, not to algorithmic inferiority.
 
-The advantage of EmbeddingCluster emerges at scale: at 325K embeddings, the PCA reduction makes the problem tractable (627s) while sklearn at 325K × 1536 × K=98 would require multiple gigabytes for BLAS intermediates and proportionally longer runtime. EmbeddingCluster's PCA→32 mode completes in 13.9s at 50K — 2x faster than sklearn with only 4.1% purity loss.
+The advantage of EmbeddingCluster emerges at scale: at 325K embeddings, the PCA reduction makes the problem tractable (627s) while sklearn at 325K × 1536 × K=98 would require multiple gigabytes for BLAS intermediates and proportionally longer runtime. EmbeddingCluster's PCA→32 mode completes in 13.9s at 50K, 2x faster than sklearn with only 4.1% purity loss.
 
 ### 5.6 Experiment 5: BIC Model Selection
 
@@ -294,6 +294,41 @@ BIC does not find a minimum within the tested range; it continues to decrease mo
 
 For practical model selection on this dataset, the diminishing-return pattern in the objective function (cosine similarity sum) provides a more useful signal than BIC: the objective curve flattens above K≈100, which roughly aligns with the 98-chapter ground truth. BIC is more appropriate for choosing between nearby K values (e.g., "is K=80 or K=120 better for my use case?") than for discovering the "true" number of clusters in data with hierarchical structure.
 
+### 5.7 Experiment 6: Runtime Profiling and the PCA Bottleneck
+
+We isolate the cost of each pipeline stage by running with varying iteration counts on the full 323K dataset.
+
+| Run | Total Time | K-means Iterations | Per-Iteration |
+|-----|-----------|-------------------|---------------|
+| PCA + 1 iteration | 637.0s | 1 | — |
+| PCA + 10 iterations | 615.4s | 10 | ~0s |
+| PCA + 50 iterations | 616.5s | 50 | ~0s |
+
+The K-means iterations are effectively free. The runtime breakdown reveals that randomized PCA dominates:
+
+| Stage | Time | Share |
+|-------|------|-------|
+| Data loading (DuckDB) | ~61s | 10% |
+| L2 normalization | ~1s | <1% |
+| **PCA matmul (323K × 1536 × 138)** | **~570s** | **90%** |
+| Spherical K-means (50 iterations) | ~4s | <1% |
+| Evaluation | ~1s | <1% |
+
+This finding has significant implications. The spherical K-means assignment step at 323K × 128d × K=98 requires approximately 4 billion multiply-adds per iteration — about 0.08 seconds at 50 GFLOPS. In contrast, the PCA random projection Y = X·Omega requires 69 billion multiply-adds, roughly 17× more compute than all 50 K-means iterations combined.
+
+Triangle-inequality acceleration (Hamerly/Elkan bounds) is therefore irrelevant for the PCA pipeline, since the operation it accelerates constitutes less than 1% of total runtime. The acceleration remains valuable for the `reduction_dim=None` path where K-means on raw 1536d data is the bottleneck.
+
+The path to the 60-second target requires addressing PCA, not K-means:
+
+| Approach | PCA Cost | K-means | Total |
+|----------|----------|---------|-------|
+| Current (hand-rolled Rust matmul) | 570s | 4s | ~635s |
+| faer crate (blocked matmul, 3-5x) | 120-190s | 4s | ~130-200s |
+| Matryoshka truncation (skip PCA) | 0s | 4s | ~66s |
+| BLAS/GPU matmul (10x) | 60s | 4s | ~65s |
+
+For users creating new embeddings, the Matryoshka path is immediately actionable: requesting 128-dimensional embeddings from the OpenAI API via the `dimensions` parameter eliminates the PCA step entirely, achieving the 60-second target on current hardware with no code changes.
+
 ---
 
 ## 6. Related Work
@@ -302,7 +337,7 @@ For practical model selection on this dataset, the diminishing-return pattern in
 
 **vMF mixture models.** Banerjee et al. [4] established the connection between spherical K-means and vMF mixtures, showing that hard spherical K-means is a special case of hard-assignment EM on a vMF mixture. Sra [10] improved the numerical estimation of the concentration parameter κ. Gopal and Yang [11] extended vMF mixtures to Bayesian and hierarchical settings. Our contribution is an implementation that handles d > 100 with stable log-space computation in a compiled systems language.
 
-**BERTopic.** Grootendorst [3] introduced a modular topic modeling pipeline that chains embedding generation, UMAP dimensionality reduction, HDBSCAN clustering, and c-TF-IDF topic representation. BERTopic is the most widely used system for embedding-based topic discovery, but its performance profile — stochastic UMAP, O(n²) graph construction, Python-level orchestration — limits its applicability at the 500K+ embedding scale for latency-sensitive applications.
+**BERTopic.** Grootendorst [3] introduced a modular topic modeling pipeline that chains embedding generation, UMAP dimensionality reduction, HDBSCAN clustering, and c-TF-IDF topic representation. BERTopic is the most widely used system for embedding-based topic discovery, but its performance profile (stochastic UMAP, O(n²) graph construction, Python-level orchestration) limits its applicability at the 500K+ embedding scale for latency-sensitive applications.
 
 **FAISS.** Meta's FAISS library [12] includes a K-means implementation with a `spherical` flag for centroid normalization, primarily used for training IVF (Inverted File) indices. FAISS K-means is highly optimized for GPU execution but does not provide integrated dimensionality reduction, evaluation metrics, or probabilistic refinement.
 
@@ -318,7 +353,7 @@ We deliberately separate the "fast spherical clustering" pipeline from UMAP-base
 
 ### 7.2 Why Randomized PCA Over Random Projection
 
-The Johnson-Lindenstrauss lemma guarantees that random projection approximately preserves pairwise distances, but the theoretical bounds are extremely conservative — for n = 500K and ε = 0.1, the required target dimension is approximately 11,248, which exceeds the original embedding dimension [7]. Randomized PCA captures the actual principal variance directions and typically achieves much better empirical preservation of cluster structure at lower target dimensions (e.g., 128).
+The Johnson-Lindenstrauss lemma guarantees that random projection approximately preserves pairwise distances, but the theoretical bounds are extremely conservative: for n = 500K and ε = 0.1, the required target dimension is approximately 11,248, which exceeds the original embedding dimension [7]. Randomized PCA captures the actual principal variance directions and typically achieves much better empirical preservation of cluster structure at lower target dimensions (e.g., 128).
 
 ### 7.3 Why Pure Rust Linear Algebra
 
