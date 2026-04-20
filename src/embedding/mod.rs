@@ -6,6 +6,7 @@
 //! This module is experimental. API may change.
 
 pub mod evaluation;
+pub mod fusion;
 pub mod normalize;
 pub mod reduction;
 pub mod spherical_hamerly;
