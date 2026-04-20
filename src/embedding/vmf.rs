@@ -31,7 +31,7 @@ pub struct VmfState {
 
 /// Fit a vMF mixture model initialized from spherical K-means results.
 pub fn fit_vmf(
-    data: &[f64],          // unit-normalized, n * d, flat row-major
+    data: &[f64], // unit-normalized, n * d, flat row-major
     n: usize,
     d: usize,
     k: usize,
@@ -86,7 +86,16 @@ pub fn fit_vmf(
         log_likelihood = new_ll;
 
         // ---- M-step: update parameters ----
-        m_step(data, &resp, &mut means, &mut concentrations, &mut weights, n, d, k);
+        m_step(
+            data,
+            &resp,
+            &mut means,
+            &mut concentrations,
+            &mut weights,
+            n,
+            d,
+            k,
+        );
     }
 
     // Compute BIC
@@ -118,7 +127,10 @@ fn e_step(
     k: usize,
 ) -> f64 {
     // Compute log-normalizer for each component
-    let log_norms: Vec<f64> = kappas.iter().map(|&kappa| log_vmf_normalizer(kappa, d)).collect();
+    let log_norms: Vec<f64> = kappas
+        .iter()
+        .map(|&kappa| log_vmf_normalizer(kappa, d))
+        .collect();
 
     // Parallel over points
     let ll_sum: f64 = (0..n)
@@ -137,7 +149,12 @@ fn e_step(
 
             // Log-sum-exp for normalization and log-likelihood contribution
             let max_log = log_r.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let log_sum = max_log + log_r.iter().map(|&lr| (lr - max_log).exp()).sum::<f64>().ln();
+            let log_sum = max_log
+                + log_r
+                    .iter()
+                    .map(|&lr| (lr - max_log).exp())
+                    .sum::<f64>()
+                    .ln();
 
             // Normalize responsibilities
             // Note: we can't write to resp here in a par_iter without unsafe.
@@ -179,7 +196,9 @@ fn m_step(
         let mut sum = vec![0.0f64; d];
         for i in 0..n {
             let r = resp[i * k + j];
-            if r < 1e-30 { continue; }
+            if r < 1e-30 {
+                continue;
+            }
             for dim in 0..d {
                 sum[dim] += r * data[i * d + dim];
             }
@@ -290,8 +309,7 @@ fn log_bessel_i(nu: f64, x: f64) -> f64 {
 
     if x > nu.max(10.0) {
         // Asymptotic expansion: log I_ν(x) ≈ x - 0.5·ln(2πx) - (4ν²-1)/(8x)
-        x - 0.5 * (2.0 * std::f64::consts::PI * x).ln()
-            - (4.0 * nu * nu - 1.0) / (8.0 * x)
+        x - 0.5 * (2.0 * std::f64::consts::PI * x).ln() - (4.0 * nu * nu - 1.0) / (8.0 * x)
     } else {
         // Series expansion: I_ν(x) = (x/2)^ν · Σ_{k=0}^{∞} (x²/4)^k / (k! · Γ(ν+k+1))
         // Computed in log-space
@@ -306,12 +324,21 @@ fn log_bessel_i(nu: f64, x: f64) -> f64 {
         for k in 1..100 {
             term += x2_over_4.ln() - (k as f64).ln() - (nu + k as f64).ln();
             terms.push(term);
-            if term > max_log_term { max_log_term = term; }
-            if term < max_log_term - 50.0 { break; } // converged
+            if term > max_log_term {
+                max_log_term = term;
+            }
+            if term < max_log_term - 50.0 {
+                break;
+            } // converged
         }
 
         // log-sum-exp of terms
-        let lse = max_log_term + terms.iter().map(|&t| (t - max_log_term).exp()).sum::<f64>().ln();
+        let lse = max_log_term
+            + terms
+                .iter()
+                .map(|&t| (t - max_log_term).exp())
+                .sum::<f64>()
+                .ln();
 
         // Full result: ν·ln(x/2) - ln(Γ(ν+1)) + lse
         nu * log_half_x - lgamma(nu + 1.0) + lse
@@ -320,12 +347,14 @@ fn log_bessel_i(nu: f64, x: f64) -> f64 {
 
 /// Log-gamma function via Stirling's approximation.
 fn lgamma(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0; }
+    if x <= 0.0 {
+        return 0.0;
+    }
     // Use Rust's built-in ln_gamma if available, otherwise Stirling
     // Stirling: ln Γ(x) ≈ (x - 0.5)·ln(x) - x + 0.5·ln(2π)
     if x > 10.0 {
-        (x - 0.5) * x.ln() - x + 0.5 * (2.0 * std::f64::consts::PI).ln()
-            + 1.0 / (12.0 * x) - 1.0 / (360.0 * x * x * x)
+        (x - 0.5) * x.ln() - x + 0.5 * (2.0 * std::f64::consts::PI).ln() + 1.0 / (12.0 * x)
+            - 1.0 / (360.0 * x * x * x)
     } else {
         // For small x, use recurrence: Γ(x+1) = x·Γ(x)
         let mut val = x;
@@ -334,7 +363,8 @@ fn lgamma(x: f64) -> f64 {
             result -= val.ln();
             val += 1.0;
         }
-        result + (val - 0.5) * val.ln() - val + 0.5 * (2.0 * std::f64::consts::PI).ln()
+        result + (val - 0.5) * val.ln() - val
+            + 0.5 * (2.0 * std::f64::consts::PI).ln()
             + 1.0 / (12.0 * val)
     }
 }
@@ -377,7 +407,9 @@ fn compute_initial_kappas(
 /// Final responsibilities are computed in one last E-step pass.
 pub fn fit_vmf_chunked(
     data: &[f64],
-    n: usize, d: usize, k: usize,
+    n: usize,
+    d: usize,
+    k: usize,
     init_centroids: &[f64],
     init_labels: &[usize],
     max_iter: usize,
@@ -393,10 +425,13 @@ pub fn fit_vmf_chunked(
 
     for iter in 0..max_iter {
         // Chunked E-step + sufficient statistics accumulation
-        let mut nk = vec![0.0f64; k];       // effective counts
-        let mut sk = vec![0.0f64; k * d];    // weighted sums
+        let mut nk = vec![0.0f64; k]; // effective counts
+        let mut sk = vec![0.0f64; k * d]; // weighted sums
         let mut new_ll = 0.0f64;
-        let log_norms: Vec<f64> = concentrations.iter().map(|&kappa| log_vmf_normalizer(kappa, d)).collect();
+        let log_norms: Vec<f64> = concentrations
+            .iter()
+            .map(|&kappa| log_vmf_normalizer(kappa, d))
+            .collect();
 
         for chunk_start in (0..n).step_by(chunk_size) {
             let chunk_end = (chunk_start + chunk_size).min(n);
@@ -413,7 +448,12 @@ pub fn fit_vmf_chunked(
                     log_r[j] = weights[j].ln() + log_norms[j] + concentrations[j] * dot;
                 }
                 let max_log = log_r.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let log_sum = max_log + log_r.iter().map(|&lr| (lr - max_log).exp()).sum::<f64>().ln();
+                let log_sum = max_log
+                    + log_r
+                        .iter()
+                        .map(|&lr| (lr - max_log).exp())
+                        .sum::<f64>()
+                        .ln();
                 new_ll += log_sum;
 
                 // Accumulate sufficient statistics
@@ -453,7 +493,9 @@ pub fn fit_vmf_chunked(
             concentrations[j] = estimate_kappa(r_bar, d);
         }
         let w_sum: f64 = weights.iter().sum();
-        for w in weights.iter_mut() { *w /= w_sum; }
+        for w in weights.iter_mut() {
+            *w /= w_sum;
+        }
     }
 
     // Final full E-step to produce responsibilities for output
@@ -463,13 +505,23 @@ pub fn fit_vmf_chunked(
     let n_params = k * (d - 1) + k + (k - 1);
     let bic = -2.0 * log_likelihood + (n_params as f64) * (n as f64).ln();
 
-    VmfState { means, concentrations, weights, responsibilities: resp, log_likelihood, n_iter, bic }
+    VmfState {
+        means,
+        concentrations,
+        weights,
+        responsibilities: resp,
+        log_likelihood,
+        n_iter,
+        bic,
+    }
 }
 
 /// Fit vMF with hard assignment (argmax responsibilities). No responsibility matrix stored during EM.
 pub fn fit_vmf_hard(
     data: &[f64],
-    n: usize, d: usize, k: usize,
+    n: usize,
+    d: usize,
+    k: usize,
     init_centroids: &[f64],
     init_labels: &[usize],
     max_iter: usize,
@@ -483,7 +535,10 @@ pub fn fit_vmf_hard(
     let mut n_iter = 0;
 
     for iter in 0..max_iter {
-        let log_norms: Vec<f64> = concentrations.iter().map(|&kappa| log_vmf_normalizer(kappa, d)).collect();
+        let log_norms: Vec<f64> = concentrations
+            .iter()
+            .map(|&kappa| log_vmf_normalizer(kappa, d))
+            .collect();
 
         // Hard E-step: argmax only, accumulate sufficient stats directly
         let mut nk = vec![0.0f64; k];
@@ -505,7 +560,12 @@ pub fn fit_vmf_hard(
                 }
             }
             let max_log = log_r.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let log_sum = max_log + log_r.iter().map(|&lr| (lr - max_log).exp()).sum::<f64>().ln();
+            let log_sum = max_log
+                + log_r
+                    .iter()
+                    .map(|&lr| (lr - max_log).exp())
+                    .sum::<f64>()
+                    .ln();
             new_ll += log_sum;
 
             // Hard assignment: all weight to best
@@ -518,7 +578,10 @@ pub fn fit_vmf_hard(
         n_iter = iter + 1;
         if iter > 0 {
             let ll_change = (new_ll - log_likelihood).abs() / log_likelihood.abs().max(1.0);
-            if ll_change < tol { log_likelihood = new_ll; break; }
+            if ll_change < tol {
+                log_likelihood = new_ll;
+                break;
+            }
         }
         log_likelihood = new_ll;
 
@@ -530,12 +593,16 @@ pub fn fit_vmf_hard(
             let r_bar = if nk[j] > 1e-30 { norm / nk[j] } else { 0.0 };
             if norm > 1e-30 {
                 let inv = 1.0 / norm;
-                for dim in 0..d { means[j * d + dim] = sk[j * d + dim] * inv; }
+                for dim in 0..d {
+                    means[j * d + dim] = sk[j * d + dim] * inv;
+                }
             }
             concentrations[j] = estimate_kappa(r_bar, d);
         }
         let w_sum: f64 = weights.iter().sum();
-        for w in weights.iter_mut() { *w /= w_sum; }
+        for w in weights.iter_mut() {
+            *w /= w_sum;
+        }
     }
 
     // Final responsibilities (hard: one-hot)
@@ -543,19 +610,33 @@ pub fn fit_vmf_hard(
     let n_params = k * (d - 1) + k + (k - 1);
     let bic = -2.0 * log_likelihood + (n_params as f64) * (n as f64).ln();
 
-    VmfState { means, concentrations, weights, responsibilities: resp, log_likelihood, n_iter, bic }
+    VmfState {
+        means,
+        concentrations,
+        weights,
+        responsibilities: resp,
+        log_likelihood,
+        n_iter,
+        bic,
+    }
 }
 
 /// Helper: compute initial weights from labels.
 fn init_weights(labels: &[usize], n: usize, k: usize) -> Vec<f64> {
     let mut weights = vec![0.0f64; k];
-    for &label in labels { weights[label] += 1.0; }
+    for &label in labels {
+        weights[label] += 1.0;
+    }
     for w in weights.iter_mut() {
         *w /= n as f64;
-        if *w < 1e-10 { *w = 1e-10; }
+        if *w < 1e-10 {
+            *w = 1e-10;
+        }
     }
     let w_sum: f64 = weights.iter().sum();
-    for w in weights.iter_mut() { *w /= w_sum; }
+    for w in weights.iter_mut() {
+        *w /= w_sum;
+    }
     weights
 }
 
@@ -612,13 +693,17 @@ mod tests {
         for _ in 0..50 {
             let mut point = vec![0.0f64; d];
             point[0] = 5.0;
-            for j in 1..d { point[j] = rng.gen_range(-0.5..0.5); }
+            for j in 1..d {
+                point[j] = rng.gen_range(-0.5..0.5);
+            }
             data.extend_from_slice(&point);
         }
         for _ in 0..50 {
             let mut point = vec![0.0f64; d];
             point[0] = -5.0;
-            for j in 1..d { point[j] = rng.gen_range(-0.5..0.5); }
+            for j in 1..d {
+                point[j] = rng.gen_range(-0.5..0.5);
+            }
             data.extend_from_slice(&point);
         }
 
@@ -629,7 +714,16 @@ mod tests {
         let centroids_flat: Vec<f64> = skmeans.centroids.as_slice().unwrap().to_vec();
 
         // Now refine with vMF
-        let vmf = fit_vmf(&norm_data, 100, d, 2, &centroids_flat, &skmeans.labels, 20, 1e-6);
+        let vmf = fit_vmf(
+            &norm_data,
+            100,
+            d,
+            2,
+            &centroids_flat,
+            &skmeans.labels,
+            20,
+            1e-6,
+        );
 
         assert_eq!(vmf.responsibilities.len(), 100 * 2);
         assert_eq!(vmf.concentrations.len(), 2);

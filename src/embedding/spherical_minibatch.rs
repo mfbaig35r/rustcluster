@@ -116,7 +116,10 @@ fn run_minibatch_single<F: Scalar>(
             .collect();
 
         // Batch objective
-        let batch_objective: f64 = assignments.iter().map(|&(_, _, dot)| dot.to_f64_lossy()).sum();
+        let batch_objective: f64 = assignments
+            .iter()
+            .map(|&(_, _, dot)| dot.to_f64_lossy())
+            .sum();
 
         // Streaming centroid update via batch resultants
         // Per-cluster batch sums
@@ -238,13 +241,17 @@ mod tests {
         for _ in 0..50 {
             let mut p = vec![0.0f64; d];
             p[0] = 5.0;
-            for j in 1..d { p[j] = rng.gen_range(-0.5..0.5); }
+            for j in 1..d {
+                p[j] = rng.gen_range(-0.5..0.5);
+            }
             data.extend_from_slice(&p);
         }
         for _ in 0..50 {
             let mut p = vec![0.0f64; d];
             p[0] = -5.0;
-            for j in 1..d { p[j] = rng.gen_range(-0.5..0.5); }
+            for j in 1..d {
+                p[j] = rng.gen_range(-0.5..0.5);
+            }
             data.extend_from_slice(&p);
         }
         let (normalized, _) = l2_normalize_rows(&data, 100, d);
@@ -259,8 +266,12 @@ mod tests {
         let la = result.labels[0];
         let lb = result.labels[50];
         assert_ne!(la, lb);
-        for i in 0..50 { assert_eq!(result.labels[i], la); }
-        for i in 50..100 { assert_eq!(result.labels[i], lb); }
+        for i in 0..50 {
+            assert_eq!(result.labels[i], la);
+        }
+        for i in 50..100 {
+            assert_eq!(result.labels[i], lb);
+        }
     }
 
     #[test]

@@ -33,10 +33,12 @@ pub fn resultant_lengths<F: Scalar>(
             if counts[c] == 0 {
                 return 0.0;
             }
-            let norm_sq: f64 = (0..d).map(|j| {
-                let mean = sums[c * d + j] / counts[c] as f64;
-                mean * mean
-            }).sum();
+            let norm_sq: f64 = (0..d)
+                .map(|j| {
+                    let mean = sums[c * d + j] / counts[c] as f64;
+                    mean * mean
+                })
+                .sum();
             norm_sq.sqrt()
         })
         .collect()
@@ -64,7 +66,13 @@ pub fn intra_cluster_similarity<F: Scalar>(
     }
 
     (0..k)
-        .map(|c| if counts[c] > 0 { sums[c] / counts[c] as f64 } else { 0.0 })
+        .map(|c| {
+            if counts[c] > 0 {
+                sums[c] / counts[c] as f64
+            } else {
+                0.0
+            }
+        })
         .collect()
 }
 
@@ -135,7 +143,9 @@ pub fn cosine_silhouette<F: Scalar>(
             let mut cluster_count = vec![0usize; k];
 
             for j in 0..n {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 let other = &data[j * d..(j + 1) * d];
                 let cos_dist = 1.0 - dot_product(point, other).to_f64_lossy();
                 cluster_dist_sum[labels[j]] += cos_dist;

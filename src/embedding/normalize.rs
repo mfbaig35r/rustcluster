@@ -16,10 +16,13 @@ pub fn l2_normalize_rows_inplace<F: Scalar>(data: &mut [F], n: usize, d: usize) 
     let zero_count = std::sync::atomic::AtomicUsize::new(0);
 
     data.par_chunks_mut(d).for_each(|row| {
-        let norm_sq: f64 = row.iter().map(|&v| {
-            let vf = v.to_f64_lossy();
-            vf * vf
-        }).sum();
+        let norm_sq: f64 = row
+            .iter()
+            .map(|&v| {
+                let vf = v.to_f64_lossy();
+                vf * vf
+            })
+            .sum();
 
         if norm_sq > 1e-30 {
             let inv_norm = F::from_f64_lossy(1.0 / norm_sq.sqrt());
@@ -67,7 +70,7 @@ mod tests {
         let mut data = vec![3.0f64, 4.0, 0.0, 0.0, 1.0, 1.0];
         let zeros = l2_normalize_rows_inplace(&mut data, 3, 2);
         assert_eq!(zeros, 1); // row [0,0]
-        // Row 0: [0.6, 0.8]
+                              // Row 0: [0.6, 0.8]
         assert!((data[0] - 0.6).abs() < 1e-10);
         assert!((data[1] - 0.8).abs() < 1e-10);
         // Row 1: [0, 0] (zero)

@@ -277,7 +277,11 @@ fn run_hamerly_single<F: Scalar>(
                 } else {
                     // Reseed from farthest point, invalidate bounds
                     let farthest = (0..n)
-                        .max_by(|&a, &b| upper[a].partial_cmp(&upper[b]).unwrap_or(std::cmp::Ordering::Equal))
+                        .max_by(|&a, &b| {
+                            upper[a]
+                                .partial_cmp(&upper[b])
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
                         .unwrap_or_else(|| rng.gen_range(0..n));
                     let point_start = farthest * d;
                     for j in 0..d {
@@ -287,7 +291,11 @@ fn run_hamerly_single<F: Scalar>(
             } else {
                 // Empty cluster: reseed, invalidate bounds
                 let farthest = (0..n)
-                    .max_by(|&a, &b| upper[a].partial_cmp(&upper[b]).unwrap_or(std::cmp::Ordering::Equal))
+                    .max_by(|&a, &b| {
+                        upper[a]
+                            .partial_cmp(&upper[b])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .unwrap_or_else(|| rng.gen_range(0..n));
                 let point_start = farthest * d;
                 for j in 0..d {
@@ -349,10 +357,8 @@ fn run_hamerly_single<F: Scalar>(
             wall_clock_ms: elapsed_ms,
         });
 
-        let converged = iter > 0
-            && rel_change < rel_obj_tol
-            && churn < churn_tol
-            && max_shift < tol.max(1e-5);
+        let converged =
+            iter > 0 && rel_change < rel_obj_tol && churn < churn_tol && max_shift < tol.max(1e-5);
 
         if converged {
             converge_count += 1;
@@ -373,7 +379,6 @@ fn run_hamerly_single<F: Scalar>(
         telemetry,
     })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -430,10 +435,9 @@ mod tests {
         // Shadow mode: verify Hamerly produces identical results to Lloyd
         let (data, n, d) = make_spherical_data();
 
-        let lloyd = super::super::spherical_kmeans::run_spherical_kmeans(
-            &data, n, d, 2, 50, 1e-6, 42, 1,
-        )
-        .unwrap();
+        let lloyd =
+            super::super::spherical_kmeans::run_spherical_kmeans(&data, n, d, 2, 50, 1e-6, 42, 1)
+                .unwrap();
         let hamerly = run_spherical_hamerly(&data, n, d, 2, 50, 1e-6, 42, 1).unwrap();
 
         // Same partition (labels may be permuted)
@@ -473,10 +477,7 @@ mod tests {
 
         for row in result.centroids.rows() {
             let norm: f64 = row.iter().map(|&v| v * v).sum::<f64>().sqrt();
-            assert!(
-                (norm - 1.0).abs() < 1e-10,
-                "Centroid norm = {norm}"
-            );
+            assert!((norm - 1.0).abs() < 1e-10, "Centroid norm = {norm}");
         }
     }
 

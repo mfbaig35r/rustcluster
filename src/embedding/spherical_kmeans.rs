@@ -21,16 +21,16 @@ pub struct IterationTelemetry {
     pub iteration: usize,
     pub objective: f64,
     pub rel_objective_change: f64,
-    pub churn: f64,           // fraction of points that changed cluster
+    pub churn: f64, // fraction of points that changed cluster
     pub max_angular_shift: f64,
     pub wall_clock_ms: f64,
 }
 
 /// Result of spherical K-means.
 pub struct SphericalKMeansState<F: Scalar> {
-    pub centroids: Array2<F>,  // (k, d), unit-norm rows
+    pub centroids: Array2<F>, // (k, d), unit-norm rows
     pub labels: Vec<usize>,
-    pub objective: f64,        // sum of dot products (higher = better)
+    pub objective: f64, // sum of dot products (higher = better)
     pub n_iter: usize,
     pub telemetry: Vec<IterationTelemetry>,
 }
@@ -50,12 +50,7 @@ pub fn dot_product<F: Scalar>(a: &[F], b: &[F]) -> F {
 
 /// Find centroid with maximum dot product (spherical assignment).
 #[inline]
-fn assign_max_dot<F: Scalar>(
-    point: &[F],
-    centroids: &[F],
-    k: usize,
-    d: usize,
-) -> (usize, F) {
+fn assign_max_dot<F: Scalar>(point: &[F], centroids: &[F], k: usize, d: usize) -> (usize, F) {
     let mut best_idx = 0;
     let mut best_dot = F::neg_infinity();
     for cluster in 0..k {
@@ -85,7 +80,9 @@ pub(crate) fn spherical_kmeans_plus_plus<F: Scalar>(
     // Pick first center uniformly at random
     let first = rng.gen_range(0..n);
     let first_row = &data[first * d..(first + 1) * d];
-    centroids.row_mut(0).assign(&ndarray::ArrayView1::from(first_row));
+    centroids
+        .row_mut(0)
+        .assign(&ndarray::ArrayView1::from(first_row));
 
     // Distances as (1 - max_dot), in f64 for sampling precision
     let mut min_dists = vec![f64::MAX; n];
@@ -105,7 +102,9 @@ pub(crate) fn spherical_kmeans_plus_plus<F: Scalar>(
 
         // Clamp negatives (numerical noise)
         for d in min_dists.iter_mut() {
-            if *d < 0.0 { *d = 0.0; }
+            if *d < 0.0 {
+                *d = 0.0;
+            }
         }
 
         let total: f64 = min_dists.iter().sum();
@@ -117,7 +116,9 @@ pub(crate) fn spherical_kmeans_plus_plus<F: Scalar>(
         };
 
         let next_row = &data[next * d..(next + 1) * d];
-        centroids.row_mut(c).assign(&ndarray::ArrayView1::from(next_row));
+        centroids
+            .row_mut(c)
+            .assign(&ndarray::ArrayView1::from(next_row));
     }
 
     centroids
@@ -127,7 +128,7 @@ pub(crate) fn spherical_kmeans_plus_plus<F: Scalar>(
 
 /// Run spherical K-means with n_init restarts.
 pub fn run_spherical_kmeans<F: Scalar>(
-    data: &[F],         // unit-normalized, n*d flat
+    data: &[F], // unit-normalized, n*d flat
     n: usize,
     d: usize,
     k: usize,
@@ -220,7 +221,12 @@ fn run_single<F: Scalar>(
         let churn = if iter == 0 {
             1.0
         } else {
-            old_labels.iter().zip(labels.iter()).filter(|(a, b)| a != b).count() as f64 / n as f64
+            old_labels
+                .iter()
+                .zip(labels.iter())
+                .filter(|(a, b)| a != b)
+                .count() as f64
+                / n as f64
         };
 
         // Centroid update: accumulate in f64, then normalize
@@ -261,7 +267,9 @@ fn run_single<F: Scalar>(
                     let farthest = assignments
                         .iter()
                         .enumerate()
-                        .min_by(|(_, a), (_, b)| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .min_by(|(_, a), (_, b)| {
+                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        })
                         .map(|(i, _)| i)
                         .unwrap_or_else(|| rng.gen_range(0..n));
                     let point_start = farthest * d;
@@ -274,7 +282,9 @@ fn run_single<F: Scalar>(
                 let farthest = assignments
                     .iter()
                     .enumerate()
-                    .min_by(|(_, a), (_, b)| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .min_by(|(_, a), (_, b)| {
+                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .map(|(i, _)| i)
                     .unwrap_or_else(|| rng.gen_range(0..n));
                 let point_start = farthest * d;
@@ -313,10 +323,8 @@ fn run_single<F: Scalar>(
             f64::MAX
         };
 
-        let converged_this_iter = iter > 0
-            && rel_change < rel_obj_tol
-            && churn < churn_tol
-            && max_shift < tol.max(1e-5); // guardrail
+        let converged_this_iter =
+            iter > 0 && rel_change < rel_obj_tol && churn < churn_tol && max_shift < tol.max(1e-5); // guardrail
 
         if converged_this_iter {
             converge_count += 1;
@@ -412,8 +420,12 @@ mod tests {
         let label_a = result.labels[0];
         let label_b = result.labels[50];
         assert_ne!(label_a, label_b);
-        for i in 0..50 { assert_eq!(result.labels[i], label_a); }
-        for i in 50..100 { assert_eq!(result.labels[i], label_b); }
+        for i in 0..50 {
+            assert_eq!(result.labels[i], label_a);
+        }
+        for i in 50..100 {
+            assert_eq!(result.labels[i], label_b);
+        }
     }
 
     #[test]
@@ -478,12 +490,18 @@ mod tests {
     #[test]
     fn test_empty_input_fails() {
         let data: Vec<f64> = vec![];
-        assert!(matches!(run_spherical_kmeans(&data, 0, 2, 1, 10, 1e-6, 42, 1), Err(ClusterError::EmptyInput)));
+        assert!(matches!(
+            run_spherical_kmeans(&data, 0, 2, 1, 10, 1e-6, 42, 1),
+            Err(ClusterError::EmptyInput)
+        ));
     }
 
     #[test]
     fn test_k_greater_than_n_fails() {
         let data = vec![1.0, 0.0, 0.0, 1.0];
-        assert!(matches!(run_spherical_kmeans(&data, 2, 2, 5, 10, 1e-6, 42, 1), Err(ClusterError::InvalidClusters { .. })));
+        assert!(matches!(
+            run_spherical_kmeans(&data, 2, 2, 5, 10, 1e-6, 42, 1),
+            Err(ClusterError::InvalidClusters { .. })
+        ));
     }
 }

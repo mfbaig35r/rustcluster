@@ -68,7 +68,11 @@ mod tests {
         let b = vec![0.0, 1.0, 1.0, 0.0];
         let (fused, d) = fuse_views(&a, &b, 2, 2, 2, 0.7, 0.3);
         for i in 0..2 {
-            let norm: f64 = fused[i * d..(i + 1) * d].iter().map(|v| v * v).sum::<f64>().sqrt();
+            let norm: f64 = fused[i * d..(i + 1) * d]
+                .iter()
+                .map(|v| v * v)
+                .sum::<f64>()
+                .sqrt();
             assert!((norm - 1.0).abs() < 1e-10, "Row {i} norm = {norm}");
         }
     }

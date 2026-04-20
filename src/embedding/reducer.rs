@@ -8,8 +8,8 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 use rayon::prelude::*;
 
 use super::normalize;
@@ -121,8 +121,8 @@ pub fn transform(
 /// [components: input_dim × target_dim × f64 LE]  (PCA only)
 /// ```
 pub fn save_state(state: &EmbeddingReducerState, path: &str) -> Result<(), String> {
-    let file = File::create(Path::new(path))
-        .map_err(|e| format!("Failed to create file: {}", e))?;
+    let file =
+        File::create(Path::new(path)).map_err(|e| format!("Failed to create file: {}", e))?;
     let mut w = BufWriter::new(file);
 
     // Header
@@ -151,8 +151,7 @@ pub fn save_state(state: &EmbeddingReducerState, path: &str) -> Result<(), Strin
 
 /// Load reducer state from a binary file.
 pub fn load_state(path: &str) -> Result<EmbeddingReducerState, String> {
-    let file = File::open(Path::new(path))
-        .map_err(|e| format!("Failed to open file: {}", e))?;
+    let file = File::open(Path::new(path)).map_err(|e| format!("Failed to open file: {}", e))?;
     let mut r = BufReader::new(file);
 
     // Magic
@@ -177,8 +176,8 @@ pub fn load_state(path: &str) -> Result<EmbeddingReducerState, String> {
     let method_len = read_u32(&mut r)? as usize;
     let mut method_bytes = vec![0u8; method_len];
     read_exact(&mut r, &mut method_bytes)?;
-    let method = String::from_utf8(method_bytes)
-        .map_err(|e| format!("Invalid method string: {}", e))?;
+    let method =
+        String::from_utf8(method_bytes).map_err(|e| format!("Invalid method string: {}", e))?;
 
     let (mean, components) = if method == "pca" {
         let mut mean = vec![0.0f64; input_dim];
@@ -211,15 +210,18 @@ fn write_bytes(w: &mut BufWriter<File>, data: &[u8]) -> Result<(), String> {
 }
 
 fn write_u32(w: &mut BufWriter<File>, v: u32) -> Result<(), String> {
-    w.write_all(&v.to_le_bytes()).map_err(|e| format!("Write error: {}", e))
+    w.write_all(&v.to_le_bytes())
+        .map_err(|e| format!("Write error: {}", e))
 }
 
 fn write_u64(w: &mut BufWriter<File>, v: u64) -> Result<(), String> {
-    w.write_all(&v.to_le_bytes()).map_err(|e| format!("Write error: {}", e))
+    w.write_all(&v.to_le_bytes())
+        .map_err(|e| format!("Write error: {}", e))
 }
 
 fn write_f64(w: &mut BufWriter<File>, v: f64) -> Result<(), String> {
-    w.write_all(&v.to_le_bytes()).map_err(|e| format!("Write error: {}", e))
+    w.write_all(&v.to_le_bytes())
+        .map_err(|e| format!("Write error: {}", e))
 }
 
 fn read_exact(r: &mut BufReader<File>, buf: &mut [u8]) -> Result<(), String> {

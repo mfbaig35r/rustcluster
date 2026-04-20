@@ -10,8 +10,8 @@
 //! Randomness: Probabilistic Algorithms for Constructing Approximate
 //! Matrix Decompositions."
 
-use faer::Mat;
 use faer::prelude::*;
+use faer::Mat;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, StandardNormal};
 use rayon::prelude::*;
@@ -79,7 +79,9 @@ pub fn compute_pca(
     // B = U_b * S * V^T → V columns are the principal directions.
     // faer's SVD is much more robust than our old power-iteration eigendecomp.
     // Singular values are sorted in descending order.
-    let svd = b_mat.thin_svd().expect("SVD of small matrix should not fail");
+    let svd = b_mat
+        .thin_svd()
+        .expect("SVD of small matrix should not fail");
 
     let actual_dim = target_dim.min(k);
 
@@ -104,11 +106,7 @@ pub fn compute_pca(
 /// Project data using a pre-computed PCA projection.
 /// Input: data (n * input_dim), projection
 /// Output: projected (n * output_dim)
-pub fn project_data<F: Scalar>(
-    data: &[F],
-    n: usize,
-    projection: &PcaProjection,
-) -> Vec<F> {
+pub fn project_data<F: Scalar>(data: &[F], n: usize, projection: &PcaProjection) -> Vec<F> {
     let d = projection.input_dim;
     let target = projection.output_dim;
 
@@ -117,9 +115,7 @@ pub fn project_data<F: Scalar>(
         let x_centered = Mat::from_fn(n, d, |i, j| {
             data[i * d + j].to_f64_lossy() - projection.mean[j]
         });
-        let comp_mat = Mat::from_fn(d, target, |i, j| {
-            projection.components[i * target + j]
-        });
+        let comp_mat = Mat::from_fn(d, target, |i, j| projection.components[i * target + j]);
         let result_mat = &x_centered * &comp_mat;
 
         let mut out = vec![F::zero(); n * target];
@@ -234,9 +230,18 @@ mod tests {
         let projected = project_data::<f64>(&data, n, &proj);
 
         // First PC should capture most of the variance
-        let var_pc1: f64 = (0..n).map(|i| projected[i * 2] * projected[i * 2]).sum::<f64>() / n as f64;
-        let var_pc2: f64 = (0..n).map(|i| projected[i * 2 + 1] * projected[i * 2 + 1]).sum::<f64>() / n as f64;
-        assert!(var_pc1 > var_pc2 * 5.0, "PC1 var={var_pc1}, PC2 var={var_pc2}");
+        let var_pc1: f64 = (0..n)
+            .map(|i| projected[i * 2] * projected[i * 2])
+            .sum::<f64>()
+            / n as f64;
+        let var_pc2: f64 = (0..n)
+            .map(|i| projected[i * 2 + 1] * projected[i * 2 + 1])
+            .sum::<f64>()
+            / n as f64;
+        assert!(
+            var_pc1 > var_pc2 * 5.0,
+            "PC1 var={var_pc1}, PC2 var={var_pc2}"
+        );
     }
 
     #[test]
@@ -254,17 +259,15 @@ mod tests {
 
     #[test]
     fn test_qr_orthonormal() {
-        let a = vec![
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0,
-            1.0, 1.0, 0.0,
-        ];
+        let a = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
         let q = qr_thin_q(&a, 4, 3);
 
         // Check columns are unit norm
         for col in 0..3 {
-            let norm: f64 = (0..4).map(|row| q[row * 3 + col] * q[row * 3 + col]).sum::<f64>().sqrt();
+            let norm: f64 = (0..4)
+                .map(|row| q[row * 3 + col] * q[row * 3 + col])
+                .sum::<f64>()
+                .sqrt();
             assert!((norm - 1.0).abs() < 1e-10, "Column {col} norm = {norm}");
         }
 
