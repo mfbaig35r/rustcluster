@@ -33,7 +33,7 @@ jobs:
         run: cargo test --no-default-features --lib
 
       - name: Build and install package
-        run: maturin develop --release
+        run: pip install . -v
 
       - name: Python tests
         run: pytest tests/ -v
