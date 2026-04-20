@@ -73,7 +73,7 @@ fn assign_max_dot<F: Scalar>(
 
 /// Spherical k-means++ initialization.
 /// Weights by (1 - max_dot_to_chosen_center) instead of squared distance.
-fn spherical_kmeans_plus_plus<F: Scalar>(
+pub(crate) fn spherical_kmeans_plus_plus<F: Scalar>(
     data: &[F],
     n: usize,
     d: usize,
