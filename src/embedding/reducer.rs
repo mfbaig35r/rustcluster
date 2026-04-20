@@ -320,7 +320,8 @@ mod tests {
         let data: Vec<f64> = (0..n * d).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
         let state = fit_pca(&data, n, d, target, 42);
-        let path = "/tmp/rustcluster_test_reducer.bin";
+        let path = std::env::temp_dir().join("rustcluster_test_reducer.bin");
+        let path = path.to_str().unwrap();
         save_state(&state, path).unwrap();
         let loaded = load_state(path).unwrap();
 
@@ -348,7 +349,8 @@ mod tests {
     #[test]
     fn test_save_load_matryoshka() {
         let state = fit_matryoshka(1536, 128);
-        let path = "/tmp/rustcluster_test_matryoshka.bin";
+        let path = std::env::temp_dir().join("rustcluster_test_matryoshka.bin");
+        let path = path.to_str().unwrap();
         save_state(&state, path).unwrap();
         let loaded = load_state(path).unwrap();
 
