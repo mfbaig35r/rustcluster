@@ -15,12 +15,24 @@ use rayon::prelude::*;
 use crate::distance::Scalar;
 use crate::error::ClusterError;
 
+/// Per-iteration diagnostic telemetry.
+#[derive(Debug, Clone)]
+pub struct IterationTelemetry {
+    pub iteration: usize,
+    pub objective: f64,
+    pub rel_objective_change: f64,
+    pub churn: f64,           // fraction of points that changed cluster
+    pub max_angular_shift: f64,
+    pub wall_clock_ms: f64,
+}
+
 /// Result of spherical K-means.
 pub struct SphericalKMeansState<F: Scalar> {
     pub centroids: Array2<F>,  // (k, d), unit-norm rows
     pub labels: Vec<usize>,
     pub objective: f64,        // sum of dot products (higher = better)
     pub n_iter: usize,
+    pub telemetry: Vec<IterationTelemetry>,
 }
 
 // ---- Hot kernels ----
@@ -163,15 +175,28 @@ fn run_single<F: Scalar>(
     let mut centroids = spherical_kmeans_plus_plus(data, n, d, k, &mut rng);
 
     let mut labels = vec![0usize; n];
+    let mut old_labels = vec![0usize; n];
     let mut objective = f64::NEG_INFINITY;
+    let mut prev_objective = f64::NEG_INFINITY;
     let mut n_iter = 0;
+    let mut converge_count = 0usize;
+    let mut telemetry = Vec::with_capacity(max_iter.min(100));
+
+    // Convergence thresholds
+    let rel_obj_tol = 1e-4;
+    let churn_tol = 0.001; // 0.1% of points
+    let patience = 2;
 
     // Pre-allocate f64 accumulation buffers
     let mut sums = vec![0.0f64; k * d];
     let mut counts = vec![0usize; k];
 
     for iter in 0..max_iter {
+        let iter_start = std::time::Instant::now();
         let centroids_slice = centroids.as_slice().expect("contiguous");
+
+        // Save old labels for churn computation
+        old_labels.copy_from_slice(&labels);
 
         // Assignment step (parallel): maximize dot product
         let assignments: Vec<(usize, F)> = (0..n)
@@ -188,7 +213,15 @@ fn run_single<F: Scalar>(
             labels[i] = label;
             new_objective += sim.to_f64_lossy();
         }
+        prev_objective = objective;
         objective = new_objective;
+
+        // Compute churn
+        let churn = if iter == 0 {
+            1.0
+        } else {
+            old_labels.iter().zip(labels.iter()).filter(|(a, b)| a != b).count() as f64 / n as f64
+        };
 
         // Centroid update: accumulate in f64, then normalize
         sums.fill(0.0);
@@ -273,7 +306,35 @@ fn run_single<F: Scalar>(
             }
         }
 
-        if max_shift < tol {
+        // Three-part convergence check
+        let rel_change = if prev_objective.abs() > 1e-30 {
+            (objective - prev_objective).abs() / prev_objective.abs()
+        } else {
+            f64::MAX
+        };
+
+        let converged_this_iter = iter > 0
+            && rel_change < rel_obj_tol
+            && churn < churn_tol
+            && max_shift < tol.max(1e-5); // guardrail
+
+        if converged_this_iter {
+            converge_count += 1;
+        } else {
+            converge_count = 0;
+        }
+
+        let elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
+        telemetry.push(IterationTelemetry {
+            iteration: n_iter,
+            objective,
+            rel_objective_change: rel_change,
+            churn,
+            max_angular_shift: max_shift,
+            wall_clock_ms: elapsed_ms,
+        });
+
+        if converge_count >= patience {
             break;
         }
     }
@@ -283,6 +344,7 @@ fn run_single<F: Scalar>(
         labels,
         objective,
         n_iter,
+        telemetry,
     })
 }
 

@@ -1457,6 +1457,7 @@ mod python_bindings {
     struct EmbeddingCluster {
         n_clusters: usize,
         reduction_dim: Option<usize>,
+        reduction: String,  // "pca" or "matryoshka"
         max_iter: usize,
         tol: f64,
         random_state: u64,
@@ -1481,11 +1482,17 @@ mod python_bindings {
     #[pymethods]
     impl EmbeddingCluster {
         #[new]
-        #[pyo3(signature = (n_clusters=50, reduction_dim=Some(128), max_iter=100, tol=1e-6, random_state=0, n_init=5))]
-        fn new(n_clusters: usize, reduction_dim: Option<usize>, max_iter: usize, tol: f64, random_state: u64, n_init: usize) -> PyResult<Self> {
+        #[pyo3(signature = (n_clusters=50, reduction_dim=Some(128), max_iter=100, tol=1e-6, random_state=0, n_init=5, reduction="pca"))]
+        fn new(n_clusters: usize, reduction_dim: Option<usize>, max_iter: usize, tol: f64, random_state: u64, n_init: usize, reduction: &str) -> PyResult<Self> {
             if n_clusters == 0 { return Err(ClusterError::InvalidClusters { k: 0, n: 0 }.into()); }
+            let reduction_str = reduction.to_lowercase();
+            if reduction_str != "pca" && reduction_str != "matryoshka" && reduction_str != "none" {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    format!("reduction must be 'pca', 'matryoshka', or 'none', got '{}'", reduction)
+                ));
+            }
             Ok(EmbeddingCluster {
-                n_clusters, reduction_dim, max_iter, tol, random_state, n_init,
+                n_clusters, reduction_dim, reduction: reduction_str, max_iter, tol, random_state, n_init,
                 labels: None, centroids: None, fitted_d: 0, objective: None, n_iter: None,
                 representatives: None, intra_similarity: None, resultant_lengths: None,
                 vmf_probabilities: None, vmf_concentrations: None, vmf_bic: None,
@@ -1515,27 +1522,35 @@ mod python_bindings {
             let seed = self.random_state;
             let n_init = self.n_init;
             let reduction_dim = self.reduction_dim;
+            let reduction_method = self.reduction.clone();
 
             let result = py.allow_threads(move || -> Result<_, ClusterError> {
                 // Step 1: L2 normalize
                 let mut data = data_f64;
                 normalize::l2_normalize_rows_inplace(&mut data, n, d);
 
-                // Step 2: Optional PCA
-                let (work_data, work_d, pca_proj) = if let Some(target) = reduction_dim {
-                    if target < d {
+                // Step 2: Dimensionality reduction
+                let (work_data, work_d, pca_proj) = match (reduction_dim, reduction_method.as_str()) {
+                    (None, _) | (Some(_), "none") => (data, d, None),
+                    (Some(target), _) if target >= d => (data, d, None),
+                    (Some(target), "matryoshka") => {
+                        // Truncate to first `target` columns, re-normalize
+                        let mut truncated = Vec::with_capacity(n * target);
+                        for i in 0..n {
+                            truncated.extend_from_slice(&data[i * d..i * d + target]);
+                        }
+                        normalize::l2_normalize_rows_inplace(&mut truncated, n, target);
+                        (truncated, target, None)
+                    }
+                    (Some(target), _) => {
+                        // PCA (default)
                         let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed);
                         let proj = reduction::compute_pca(&data, n, d, target, 10, &mut rng);
                         let projected = reduction::project_data::<f64>(&data, n, &proj);
-                        // Re-normalize after PCA
                         let mut proj_data = projected;
                         normalize::l2_normalize_rows_inplace(&mut proj_data, n, proj.output_dim);
                         (proj_data, proj.output_dim, Some(proj))
-                    } else {
-                        (data, d, None)
                     }
-                } else {
-                    (data, d, None)
                 };
 
                 // Step 3: Spherical K-means
