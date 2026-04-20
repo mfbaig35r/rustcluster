@@ -1524,17 +1524,20 @@ mod python_bindings {
             let reduction_dim = self.reduction_dim;
             let reduction_method = self.reduction.clone();
 
-            let result = py.allow_threads(move || -> Result<_, ClusterError> {
-                // Step 1: L2 normalize
+            // Stage 1: L2 normalize (GIL released)
+            let mut data = py.allow_threads(move || {
                 let mut data = data_f64;
                 normalize::l2_normalize_rows_inplace(&mut data, n, d);
+                data
+            });
+            py.check_signals()?;
 
-                // Step 2: Dimensionality reduction
-                let (work_data, work_d, pca_proj) = match (reduction_dim, reduction_method.as_str()) {
+            // Stage 2: Dimensionality reduction (GIL released)
+            let (work_data, work_d, pca_proj) = py.allow_threads(|| {
+                match (reduction_dim, reduction_method.as_str()) {
                     (None, _) | (Some(_), "none") => (data, d, None),
                     (Some(target), _) if target >= d => (data, d, None),
                     (Some(target), "matryoshka") => {
-                        // Truncate to first `target` columns, re-normalize
                         let mut truncated = Vec::with_capacity(n * target);
                         for i in 0..n {
                             truncated.extend_from_slice(&data[i * d..i * d + target]);
@@ -1543,7 +1546,6 @@ mod python_bindings {
                         (truncated, target, None)
                     }
                     (Some(target), _) => {
-                        // PCA (default)
                         let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed);
                         let proj = reduction::compute_pca(&data, n, d, target, 10, &mut rng);
                         let projected = reduction::project_data::<f64>(&data, n, &proj);
@@ -1551,22 +1553,26 @@ mod python_bindings {
                         normalize::l2_normalize_rows_inplace(&mut proj_data, n, proj.output_dim);
                         (proj_data, proj.output_dim, Some(proj))
                     }
-                };
+                }
+            });
+            py.check_signals()?;
 
-                // Step 3: Spherical K-means
-                let skmeans = spherical_kmeans::run_spherical_kmeans(
+            // Stage 3: Spherical K-means (GIL released)
+            let skmeans = py.allow_threads(|| {
+                spherical_kmeans::run_spherical_kmeans(
                     &work_data, n, work_d, k, max_iter, tol, seed, n_init,
-                )?;
+                )
+            })?;
+            py.check_signals()?;
 
-                let centroids_flat = skmeans.centroids.as_slice().unwrap().to_vec();
-
-                // Step 4: Evaluation
+            // Stage 4: Evaluation (GIL released)
+            let centroids_flat = skmeans.centroids.as_slice().unwrap().to_vec();
+            let result = py.allow_threads(|| {
                 let reps = evaluation::find_representatives(&work_data, &skmeans.labels, &centroids_flat, n, work_d, k);
                 let intra_sim = evaluation::intra_cluster_similarity(&work_data, &skmeans.labels, &centroids_flat, n, work_d, k);
                 let res_lens = evaluation::resultant_lengths(&work_data, &skmeans.labels, n, work_d, k);
-
-                Ok((skmeans.labels, centroids_flat, work_d, skmeans.objective, skmeans.n_iter, reps, intra_sim, res_lens, pca_proj))
-            })?;
+                (skmeans.labels, centroids_flat, work_d, skmeans.objective, skmeans.n_iter, reps, intra_sim, res_lens, pca_proj)
+            });
 
             let (labels, centroids, work_d, objective, n_iter, reps, intra_sim, res_lens, pca_proj) = result;
             self.labels = Some(labels);
