@@ -44,7 +44,7 @@ class EmbeddingCluster:
     """
 
     def __init__(self, n_clusters=50, reduction_dim=128, max_iter=100,
-                 tol=1e-6, random_state=0, n_init=5):
+                 tol=1e-6, random_state=0, n_init=5, reduction="pca"):
         self._model = _RustEmbeddingCluster(
             n_clusters=n_clusters,
             reduction_dim=reduction_dim,
@@ -52,6 +52,7 @@ class EmbeddingCluster:
             tol=tol,
             random_state=random_state,
             n_init=n_init,
+            reduction=reduction,
         )
         self._n_clusters = n_clusters
         self._reduction_dim = reduction_dim
@@ -59,6 +60,7 @@ class EmbeddingCluster:
         self._tol = tol
         self._random_state = random_state
         self._n_init = n_init
+        self._reduction = reduction
         self._X = None  # cached for refine_vmf
 
     def fit(self, X):
