@@ -3,10 +3,15 @@
 //! Halko-Martinsson-Tropp algorithm for fast approximate truncated SVD.
 //! Much faster than full SVD when target rank << min(n, d).
 //!
+//! Uses faer for optimized dense matrix multiplication (GEMM) and SVD.
+//! The big matmuls use faer's cache-blocked, SIMD-accelerated kernels.
+//!
 //! Reference: Halko, Martinsson, Tropp (2011), "Finding Structure with
 //! Randomness: Probabilistic Algorithms for Constructing Approximate
 //! Matrix Decompositions."
 
+use faer::Mat;
+use faer::prelude::*;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, StandardNormal};
 use rayon::prelude::*;
@@ -38,7 +43,7 @@ pub fn compute_pca(
 ) -> PcaProjection {
     let k = (target_dim + oversampling).min(d).min(n);
 
-    // Step 1: Compute and subtract column means
+    // Step 1: Compute column means
     let mut mean = vec![0.0f64; d];
     for i in 0..n {
         for j in 0..d {
@@ -49,88 +54,42 @@ pub fn compute_pca(
         mean[j] /= n as f64;
     }
 
-    // Centered data (we'll work with it implicitly in the matmul)
-
     // Step 2: Generate random Gaussian matrix Omega: (d, k)
     let normal = StandardNormal;
     let omega: Vec<f64> = (0..d * k).map(|_| normal.sample(rng)).collect();
 
     // Step 3: Y = (X - mean) * Omega, shape (n, k)
-    // Parallelized over rows of X
-    let mut y = vec![0.0f64; n * k];
-    y.par_chunks_mut(k)
-        .enumerate()
-        .for_each(|(i, y_row)| {
-            for col in 0..k {
-                let mut acc = 0.0f64;
-                for j in 0..d {
-                    acc += (data[i * d + j] - mean[j]) * omega[j * k + col];
-                }
-                y_row[col] = acc;
-            }
-        });
+    // This is THE bottleneck (323K × 1536 × 138 = 69 billion multiply-adds).
+    // faer's blocked, SIMD-accelerated GEMM replaces our naive row-parallel loops.
+    let x_centered = Mat::from_fn(n, d, |i, j| data[i * d + j] - mean[j]);
+    let omega_mat = Mat::from_fn(d, k, |i, j| omega[i * k + j]);
+    let y_mat = &x_centered * &omega_mat;
 
     // Step 4: QR decomposition of Y → Q (n, k)
-    // Using modified Gram-Schmidt (simple, stable enough for this purpose)
-    let q = qr_thin_q(&y, n, k);
+    // Using modified Gram-Schmidt — works well for k ≤ ~140.
+    let y_flat = faer_to_flat_row_major(&y_mat);
+    let q_flat = qr_thin_q(&y_flat, n, k);
 
-    // Step 5: B = Q^T * (X - mean), shape (k, d)
-    let mut b = vec![0.0f64; k * d];
-    // Each row of B: b_row[j] = sum_i q[i * k + row] * (data[i * d + j] - mean[j])
-    for row in 0..k {
-        for j in 0..d {
-            let mut acc = 0.0f64;
-            for i in 0..n {
-                acc += q[i * k + row] * (data[i * d + j] - mean[j]);
-            }
-            b[row * d + j] = acc;
-        }
-    }
+    // Step 5: B = Q^T * X_centered, shape (k, d)
+    // Second big matmul — faer GEMM for cache-blocked performance.
+    let q_mat = Mat::from_fn(n, k, |i, j| q_flat[i * k + j]);
+    let b_mat = q_mat.transpose() * &x_centered;
 
-    // Step 6: SVD of B (k x d matrix, k is small)
-    // We need the right singular vectors V (d x k)
-    // B = U_b * S * V^T  →  V columns are the principal directions
-    //
-    // Instead of full SVD, compute B^T * B (d x d is too big if d=1536)
-    // Better: B * B^T (k x k, small!), get eigendecomposition
-    // B * B^T = U_b * S^2 * U_b^T
-    // Then V = B^T * U_b * S^{-1}
+    // Step 6: Thin SVD of B (k × d matrix, k is small).
+    // B = U_b * S * V^T → V columns are the principal directions.
+    // faer's SVD is much more robust than our old power-iteration eigendecomp.
+    // Singular values are sorted in descending order.
+    let svd = b_mat.thin_svd().expect("SVD of small matrix should not fail");
 
-    // Compute C = B * B^T (k x k)
-    let mut c = vec![0.0f64; k * k];
-    for i in 0..k {
-        for j in 0..=i {
-            let mut acc = 0.0f64;
-            for l in 0..d {
-                acc += b[i * d + l] * b[j * d + l];
-            }
-            c[i * k + j] = acc;
-            c[j * k + i] = acc;
-        }
-    }
-
-    // Eigendecomposition of C (symmetric k x k) via symmetric QR iteration
-    // C is small (at most ~140 x 140), so this is fast
-    let (eigenvalues, eigenvectors) = symmetric_eigen(&c, k);
-
-    // eigenvalues/eigenvectors are sorted descending by eigenvalue
     let actual_dim = target_dim.min(k);
 
-    // Compute V = B^T * U_b * S^{-1} for top actual_dim components
-    // V shape: (d, actual_dim)
+    // Extract top actual_dim right singular vectors as components.
+    // V from thin SVD has shape (d, k), columns are right singular vectors.
+    let v = svd.V();
     let mut components = vec![0.0f64; d * actual_dim];
-    for comp in 0..actual_dim {
-        let eigenval = eigenvalues[comp];
-        let s_inv = if eigenval > 1e-30 { 1.0 / eigenval.sqrt() } else { 0.0 };
-
-        // u_col = eigenvectors column comp (stored as eigenvectors[i * k + comp])
-        // v_col = B^T * u_col * s_inv
-        for j in 0..d {
-            let mut acc = 0.0f64;
-            for i in 0..k {
-                acc += b[i * d + j] * eigenvectors[i * k + comp];
-            }
-            components[j * actual_dim + comp] = acc * s_inv;
+    for j in 0..d {
+        for comp in 0..actual_dim {
+            components[j * actual_dim + comp] = v[(j, comp)];
         }
     }
 
@@ -152,21 +111,52 @@ pub fn project_data<F: Scalar>(
 ) -> Vec<F> {
     let d = projection.input_dim;
     let target = projection.output_dim;
-    let mut out = vec![F::zero(); n * target];
 
-    out.par_chunks_mut(target)
-        .enumerate()
-        .for_each(|(i, out_row)| {
-            for col in 0..target {
-                let mut acc = 0.0f64;
-                for j in 0..d {
-                    let val = data[i * d + j].to_f64_lossy() - projection.mean[j];
-                    acc += val * projection.components[j * target + col];
-                }
-                out_row[col] = F::from_f64_lossy(acc);
-            }
+    // For large n, use faer GEMM; for small n, manual loops are fine.
+    if n >= 1000 {
+        let x_centered = Mat::from_fn(n, d, |i, j| {
+            data[i * d + j].to_f64_lossy() - projection.mean[j]
         });
+        let comp_mat = Mat::from_fn(d, target, |i, j| {
+            projection.components[i * target + j]
+        });
+        let result_mat = &x_centered * &comp_mat;
 
+        let mut out = vec![F::zero(); n * target];
+        for i in 0..n {
+            for j in 0..target {
+                out[i * target + j] = F::from_f64_lossy(result_mat[(i, j)]);
+            }
+        }
+        out
+    } else {
+        // Small n — avoid faer allocation overhead
+        let mut out = vec![F::zero(); n * target];
+        out.par_chunks_mut(target)
+            .enumerate()
+            .for_each(|(i, out_row)| {
+                for col in 0..target {
+                    let mut acc = 0.0f64;
+                    for j in 0..d {
+                        let val = data[i * d + j].to_f64_lossy() - projection.mean[j];
+                        acc += val * projection.components[j * target + col];
+                    }
+                    out_row[col] = F::from_f64_lossy(acc);
+                }
+            });
+        out
+    }
+}
+
+/// Convert a faer Mat to flat row-major Vec<f64>.
+fn faer_to_flat_row_major(mat: &Mat<f64>) -> Vec<f64> {
+    let (m, n) = (mat.nrows(), mat.ncols());
+    let mut out = vec![0.0f64; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            out[i * n + j] = mat[(i, j)];
+        }
+    }
     out
 }
 
@@ -203,77 +193,6 @@ fn qr_thin_q(a: &[f64], n: usize, k: usize) -> Vec<f64> {
     }
 
     q
-}
-
-/// Eigendecomposition of a small symmetric matrix via deflated power iteration.
-/// Returns (eigenvalues, eigenvectors) sorted descending by eigenvalue.
-/// eigenvectors stored flat row-major: eigenvectors[i * n + comp] = i-th element of comp-th eigenvector.
-fn symmetric_eigen(mat: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
-    let mut eigenvalues = Vec::with_capacity(n);
-    let mut eigenvectors = vec![0.0f64; n * n];
-
-    // Work on a copy that we deflate
-    let mut work = mat.to_vec();
-
-    for comp in 0..n {
-        // Power iteration for top eigenvector of current deflated matrix
-        let mut v = vec![0.0f64; n];
-        // Initialize with a non-zero vector
-        v[comp % n] = 1.0;
-
-        let max_power_iters = 200;
-        for _ in 0..max_power_iters {
-            // w = work * v
-            let mut w = vec![0.0f64; n];
-            for i in 0..n {
-                let mut acc = 0.0f64;
-                for j in 0..n {
-                    acc += work[i * n + j] * v[j];
-                }
-                w[i] = acc;
-            }
-
-            // Normalize
-            let norm: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
-            if norm < 1e-30 {
-                break;
-            }
-            for x in w.iter_mut() {
-                *x /= norm;
-            }
-
-            // Check convergence: |w - v| < eps
-            let diff: f64 = w.iter().zip(v.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
-            v = w;
-            if diff < 1e-12 {
-                break;
-            }
-        }
-
-        // Eigenvalue = v^T * work * v
-        let mut eigenval = 0.0f64;
-        for i in 0..n {
-            let mut row_dot = 0.0f64;
-            for j in 0..n {
-                row_dot += work[i * n + j] * v[j];
-            }
-            eigenval += v[i] * row_dot;
-        }
-
-        eigenvalues.push(eigenval);
-        for i in 0..n {
-            eigenvectors[i * n + comp] = v[i];
-        }
-
-        // Deflate: work -= eigenval * v * v^T
-        for i in 0..n {
-            for j in 0..n {
-                work[i * n + j] -= eigenval * v[i] * v[j];
-            }
-        }
-    }
-
-    (eigenvalues, eigenvectors)
 }
 
 #[cfg(test)]

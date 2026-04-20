@@ -1,219 +1,229 @@
-# Clustering OpenAI Embeddings with rustcluster
+# Embedding Clustering Guide
 
-A practical guide for clustering large sets of text embeddings (100K-400K+ vectors at 1536 dimensions).
+A practical guide for clustering dense embedding vectors from OpenAI, Cohere, Voyage, and similar models using rustcluster.
 
-## The Problem
-
-OpenAI's text-embedding-3-small produces 1536-dimensional vectors. At scale, this creates memory and performance challenges:
-
-| Dataset size | Raw f64 memory | Raw f32 memory |
-|-------------|---------------|---------------|
-| 100K embeddings | 1.2 GB | 600 MB |
-| 200K embeddings | 2.3 GB | 1.2 GB |
-| 400K embeddings | 4.7 GB | 2.3 GB |
-
-scikit-learn's K-means adds intermediate matrices on top of this (copies, distance matrices, bounds arrays), often doubling or tripling the peak memory. This is where OOM errors come from.
-
-## Recommended Pipeline
-
-### Step 1: Load as float32
-
-OpenAI embeddings are effectively float32 precision — the API returns float64 but the model produces float32. Casting to f32 halves your memory with no quality loss.
+## Quick Start
 
 ```python
+from rustcluster.experimental import EmbeddingCluster
+
+model = EmbeddingCluster(n_clusters=50, reduction_dim=128)
+model.fit(embeddings)  # L2-normalize → PCA → spherical K-means
+
+print(model.labels_)           # cluster assignments
+print(model.cluster_centers_)  # unit-norm centroids in reduced space
+print(model.objective_)        # sum of cosine similarities
+```
+
+`EmbeddingCluster` is the all-in-one pipeline optimized for embedding vectors. It handles normalization, dimensionality reduction, and spherical clustering in a single call.
+
+## Choosing a Reduction Method
+
+High-dimensional embeddings (768d–3072d) benefit from dimensionality reduction before clustering. You have three options:
+
+### Option A: Matryoshka — Skip PCA Entirely (Fastest)
+
+If you're generating **new** embeddings from a model that supports the `dimensions` parameter, request low-dimensional embeddings at API call time:
+
+```python
+from openai import OpenAI
+client = OpenAI()
+
+response = client.embeddings.create(
+    input=texts,
+    model="text-embedding-3-small",
+    dimensions=128  # ← returns 128d instead of 1536d
+)
+embeddings_128d = np.array([e.embedding for e in response.data], dtype=np.float32)
+```
+
+Then cluster directly — no PCA needed:
+
+```python
+model = EmbeddingCluster(n_clusters=50, reduction_dim=None)
+model.fit(embeddings_128d)  # ~5s for 323K points
+```
+
+**Supported models:** OpenAI text-embedding-3-small/large, Cohere embed-v3 (with `input_type`), and other Matryoshka-trained models.
+
+**When to use:** New projects where you control the embedding pipeline. Eliminates the PCA step entirely — reduction cost is 0s.
+
+**Limitation:** Not all models support this. Can't retroactively request lower dimensions for existing embeddings stored in a database.
+
+#### Truncating Existing Matryoshka Embeddings
+
+If you already have high-dimensional embeddings from a Matryoshka-trained model, you can truncate them client-side:
+
+```python
+from rustcluster.experimental import EmbeddingReducer
+
+reducer = EmbeddingReducer(target_dim=128, method="matryoshka")
+X_reduced = reducer.fit_transform(embeddings)  # slices first 128 cols + L2-normalizes
+```
+
+This is instant (no fitting needed). It works because Matryoshka-trained models pack the most important information into the first dimensions. The L2 re-normalization preserves cosine geometry.
+
+### Option B: PCA — Works with Any Embeddings
+
+For embeddings from models that don't support Matryoshka, or existing 1536d data you can't re-embed, use randomized PCA:
+
+```python
+model = EmbeddingCluster(n_clusters=50, reduction_dim=128)
+model.fit(embeddings)  # PCA + cluster in one pipeline
+```
+
+PCA is the default. It works with any embedding model but the matrix factorization takes ~10 minutes for 323K × 1536d on Apple Silicon.
+
+**Key optimization: separate reduction from clustering** (see next section).
+
+### Option C: No Reduction
+
+If your embeddings are already low-dimensional (≤256d) — either from Matryoshka, a smaller model, or pre-reduced data:
+
+```python
+model = EmbeddingCluster(n_clusters=50, reduction_dim=None)
+model.fit(embeddings_128d)  # direct clustering, no PCA
+```
+
+## EmbeddingReducer: Fit Once, Cluster Many Times
+
+PCA is 99% of the EmbeddingCluster runtime. `EmbeddingReducer` separates reduction from clustering so you pay the PCA cost once:
+
+```python
+from rustcluster.experimental import EmbeddingReducer
 import numpy as np
 
-# If loading from a file/database
-embeddings = np.array(your_embeddings, dtype=np.float32)  # (n, 1536)
+# Pay the PCA cost once (~10 min for 323K × 1536d)
+reducer = EmbeddingReducer(target_dim=128, method="pca")
+X_reduced = reducer.fit_transform(embeddings)
+np.save("reduced_128.npy", X_reduced)
+
+# Iterate on clustering for free
+X_reduced = np.load("reduced_128.npy")  # 0.03s
+
+EmbeddingCluster(n_clusters=50,  reduction_dim=None).fit(X_reduced)  #  4s
+EmbeddingCluster(n_clusters=98,  reduction_dim=None).fit(X_reduced)  #  7s
+EmbeddingCluster(n_clusters=200, reduction_dim=None).fit(X_reduced)  # 15s
 ```
 
-### Step 2: Reduce dimensionality
+### Save/Load the Reducer Model
 
-1536 dimensions is too many for effective clustering. At high dimensions, Euclidean distance becomes less meaningful (the "curse of dimensionality" — all points become roughly equidistant). Reducing to 20-50 dimensions:
-
-- Removes noise dimensions
-- Improves cluster quality
-- Massively reduces memory and compute
+For production pipelines where new data arrives:
 
 ```python
-from sklearn.decomposition import PCA
+# Save the fitted PCA model (1.5 KB)
+reducer.save("pca_128.bin")
 
-# Reduce from 1536 to 32 dimensions
-reduced = PCA(n_components=32).fit_transform(embeddings).astype(np.float32)
-# (400K, 32) × 4 bytes = 49 MB — down from 2.3 GB
+# Later — load and project new embeddings (~5s for 323K points)
+reducer = EmbeddingReducer.load("pca_128.bin")
+X_new_reduced = reducer.transform(new_embeddings)
 ```
 
-**Alternatives to PCA:**
-- **UMAP** — better at preserving local structure, slower to fit. Use `umap-learn` package.
-- **t-SNE** — good for visualization (2-3d), not recommended for clustering input.
+### Access Reduced Data from EmbeddingCluster
 
-### Step 3: Cluster with rustcluster
-
-With reduced f32 data, you're in rustcluster's sweet spot (d < 20, f32, low memory).
-
-**K-Means** — when you know the number of clusters:
+If you used the convenience pipeline, access the intermediate PCA output:
 
 ```python
-from rustcluster import KMeans, silhouette_score
+model = EmbeddingCluster(n_clusters=50, reduction_dim=128)
+model.fit(embeddings)
 
-model = KMeans(n_clusters=50, random_state=42)
-model.fit(reduced)
-
-print(f"Clusters: {len(set(model.labels_))}")
-print(f"Silhouette: {silhouette_score(reduced, model.labels_):.3f}")
+X_reduced = model.reduced_data_  # (n, 128) numpy array, L2-normalized
+np.save("reduced_128.npy", X_reduced)
 ```
 
-**HDBSCAN** — when you don't know the number of clusters:
+Returns `None` if `reduction_dim=None`.
+
+## Using Reduced Data with Any Algorithm
+
+Reduced embeddings work with all rustcluster algorithms:
 
 ```python
-from rustcluster import HDBSCAN
+from rustcluster import KMeans, DBSCAN, HDBSCAN, AgglomerativeClustering
 
-model = HDBSCAN(min_cluster_size=100)
-model.fit(reduced)
+X_reduced = np.load("reduced_128.npy")
 
-n_clusters = len(set(model.labels_)) - (1 if -1 in model.labels_ else 0)
-n_noise = sum(model.labels_ == -1)
-print(f"Clusters: {n_clusters}, Noise: {n_noise}")
-print(f"Probabilities: {model.probabilities_[:5]}")
+# Use metric="cosine" — the data is L2-normalized after reduction
+KMeans(n_clusters=50, metric="cosine").fit(X_reduced)
+DBSCAN(eps=0.5, metric="cosine").fit(X_reduced)
+HDBSCAN(min_cluster_size=100, metric="cosine").fit(X_reduced)
+AgglomerativeClustering(n_clusters=50, linkage="average", metric="cosine").fit(X_reduced)
 ```
 
-**MiniBatchKMeans** — for very large datasets (1M+):
+## Workflow Decision Tree
+
+```
+Do you control the embedding pipeline?
+├── YES: Does your model support Matryoshka / dimensions parameter?
+│   ├── YES → Request 128d at API time (Option A). Zero reduction cost.
+│   └── NO  → EmbeddingReducer(method="pca") (Option B).
+└── NO (existing embeddings):
+    ├── Already ≤256d? → Skip reduction (Option C).
+    ├── From a Matryoshka model? → EmbeddingReducer(method="matryoshka").
+    └── Other → EmbeddingReducer(method="pca") (Option B).
+
+Running multiple clustering configs?
+→ Always save reduced data and cluster with reduction_dim=None.
+```
+
+## Performance Reference
+
+Measured on 323,308 CROSS ruling embeddings (text-embedding-3-small, 1536d → 128d, K=98, Apple Silicon):
+
+| Workflow | Time | vs Baseline |
+|----------|------|-------------|
+| EmbeddingCluster end-to-end (PCA every run) | 618s | 1x |
+| EmbeddingReducer first run (fit_transform + save) | 615s | — |
+| Subsequent run (load cached .npy + cluster) | **7.5s** | **82x faster** |
+| 5 clustering configs on cached data | 74s | 42x vs 5× baseline |
+| Matryoshka 128d from API (no PCA at all) | **~5s** | **~120x faster** |
+
+### Persistence Strategy
+
+| Strategy | File Size | Load Time | Best For |
+|----------|-----------|-----------|----------|
+| Save reduced data (`np.save`) | 316 MB | 0.03s | Same data, iterating on K/algorithm |
+| Save reducer model (`.save()`) | 1.5 KB | 0.001s + 5.5s transform | New data, same PCA projection |
+
+## Evaluation and Refinement
+
+### Evaluation Metrics
 
 ```python
-from rustcluster import MiniBatchKMeans
-
-model = MiniBatchKMeans(n_clusters=50, batch_size=1024, random_state=42)
-model.fit(reduced)
+print(model.intra_similarity_)    # per-cluster avg cosine similarity to centroid
+print(model.resultant_lengths_)   # per-cluster directional concentration [0, 1]
+print(model.representatives_)     # index of most representative point per cluster
 ```
 
-### Step 4: Evaluate
+### vMF Refinement (Soft Clustering)
+
+For soft cluster probabilities and model selection:
 
 ```python
-from rustcluster import silhouette_score, calinski_harabasz_score, davies_bouldin_score
-
-labels = model.labels_
-
-print(f"Silhouette:        {silhouette_score(reduced, labels):.3f}")     # [-1, 1], higher = better
-print(f"Calinski-Harabasz: {calinski_harabasz_score(reduced, labels):.1f}")  # higher = better
-print(f"Davies-Bouldin:    {davies_bouldin_score(reduced, labels):.3f}")  # lower = better
+model.refine_vmf()
+print(model.probabilities_)   # (n, k) soft membership matrix
+print(model.concentrations_)  # per-cluster κ (higher = tighter)
+print(model.bic_)             # Bayesian Information Criterion
 ```
 
-## Alternative: Cluster Raw Embeddings with Cosine Distance
+### Finding the Right K
 
-If you don't want to reduce dimensions, you can cluster the raw 1536d embeddings with cosine distance. Cosine is more appropriate than Euclidean for normalized embeddings because it measures angular similarity.
+Use BIC from vMF to compare different cluster counts:
 
 ```python
-from rustcluster import KMeans
+X_reduced = np.load("reduced_128.npy")
 
-# No dimensionality reduction — cluster raw embeddings
-model = KMeans(n_clusters=50, metric="cosine", random_state=42)
-model.fit(embeddings)  # embeddings should be f32 for memory efficiency
+for k in [20, 50, 98, 150, 200]:
+    m = EmbeddingCluster(n_clusters=k, reduction_dim=None).fit(X_reduced)
+    m.refine_vmf()
+    print(f"K={k:3d}  obj={m.objective_:.0f}  BIC={m.bic_:.0f}")
 ```
 
-This works and avoids sklearn's OOM issues (no intermediate distance matrix), but is slower per-iteration than the PCA + Euclidean approach because:
-- d=1536 means more work per distance computation
-- cosine distance forces Lloyd's algorithm (Hamerly's bounds assume Euclidean)
-- No KD-tree acceleration for cosine
-
-**When to use raw cosine clustering:**
-- Small-to-medium datasets (< 50K embeddings)
-- When PCA might lose important semantic structure
-- When you need the simplest possible pipeline
-
-**When to reduce first:**
-- Large datasets (100K+)
-- When you need fast iteration on cluster count
-- When memory is constrained
-
-## Memory Comparison
-
-For 400K embeddings, k=50:
-
-| Approach | Peak memory |
-|----------|------------|
-| sklearn K-means on raw f64 embeddings | ~6-10 GB |
-| rustcluster cosine K-means on raw f32 embeddings | ~2.4 GB |
-| rustcluster K-means on PCA-reduced f32 (d=32) | ~60 MB |
-
-## Finding the Right Number of Clusters
-
-If you don't know how many clusters to use, try:
-
-**1. Elbow method with inertia:**
-
-```python
-from rustcluster import KMeans
-
-inertias = []
-for k in range(5, 105, 5):
-    model = KMeans(n_clusters=k, random_state=42, n_init=3).fit(reduced)
-    inertias.append((k, model.inertia_))
-    print(f"k={k:3d}  inertia={model.inertia_:.0f}")
-
-# Look for the "elbow" — where inertia stops decreasing sharply
-```
-
-**2. Silhouette sweep:**
-
-```python
-from rustcluster import KMeans, silhouette_score
-
-for k in [10, 20, 30, 50, 75, 100]:
-    model = KMeans(n_clusters=k, random_state=42, n_init=3).fit(reduced)
-    score = silhouette_score(reduced, model.labels_)
-    print(f"k={k:3d}  silhouette={score:.3f}")
-
-# Higher silhouette = better-defined clusters
-```
-
-**3. Let HDBSCAN decide:**
-
-```python
-from rustcluster import HDBSCAN
-
-# HDBSCAN automatically determines cluster count
-model = HDBSCAN(min_cluster_size=50).fit(reduced)
-n_clusters = len(set(model.labels_)) - (1 if -1 in model.labels_ else 0)
-print(f"HDBSCAN found {n_clusters} clusters ({sum(model.labels_ == -1)} noise points)")
-```
-
-## Full Example
-
-```python
-import numpy as np
-from sklearn.decomposition import PCA
-from rustcluster import KMeans, HDBSCAN, silhouette_score
-
-# 1. Load embeddings
-embeddings = np.load("embeddings.npy").astype(np.float32)  # (200K, 1536)
-print(f"Raw: {embeddings.shape}, {embeddings.nbytes / 1e6:.0f} MB")
-
-# 2. Reduce dimensions
-reduced = PCA(n_components=32).fit_transform(embeddings).astype(np.float32)
-print(f"Reduced: {reduced.shape}, {reduced.nbytes / 1e6:.0f} MB")
-
-# 3. Cluster
-model = KMeans(n_clusters=30, random_state=42).fit(reduced)
-
-# 4. Evaluate
-score = silhouette_score(reduced, model.labels_)
-print(f"Silhouette: {score:.3f}")
-
-# 5. Inspect
-for cluster_id in range(model.cluster_centers_.shape[0]):
-    mask = model.labels_ == cluster_id
-    print(f"Cluster {cluster_id}: {mask.sum()} items")
-```
+Lower BIC is better (penalizes model complexity).
 
 ## Tips
 
-- **Always use f32 for embeddings.** No quality loss, half the memory.
-- **PCA to 20-50 dimensions is usually the right range.** Below 20 you lose information, above 50 you're not gaining much.
-- **Start with HDBSCAN if you don't know the cluster count.** It handles noise (outliers get label -1) and finds natural cluster boundaries.
-- **Use n_init=3-5 for K-means, not the default 10.** On large datasets, 3 initializations is usually enough and saves 2-3x runtime.
-- **Pickle your fitted model** so you don't have to recluster:
-  ```python
-  import pickle
-  pickle.dump(model, open("cluster_model.pkl", "wb"))
-  model = pickle.load(open("cluster_model.pkl", "rb"))
-  ```
+- **Always use f32 for embeddings.** No quality loss vs f64, half the memory.
+- **128d is a good default reduction target.** Below 64 you lose information, above 256 PCA gains diminish.
+- **Use `metric="cosine"` when clustering reduced data.** The data is L2-normalized after reduction, so cosine distance is the natural metric.
+- **Start with n_init=1 for exploration, increase to 3-5 for final results.** Each init re-runs K-means from scratch.
+- **Use HDBSCAN if you don't know K.** It finds natural cluster boundaries and labels outliers as -1.

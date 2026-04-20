@@ -1450,7 +1450,7 @@ mod python_bindings {
     // ---- EmbeddingCluster (experimental) ----
 
     use crate::embedding::{
-        evaluation, normalize, reduction, spherical_kmeans, vmf,
+        evaluation, normalize, reducer, reduction, spherical_kmeans, vmf,
     };
 
     #[pyclass]
@@ -1477,6 +1477,10 @@ mod python_bindings {
         vmf_bic: Option<f64>,
         // PCA projection for later use
         pca_projection: Option<reduction::PcaProjection>,
+        // Cached reduced data (post-PCA, L2-normalized)
+        reduced_data: Option<Vec<f64>>,
+        reduced_n: usize,
+        reduced_d: usize,
     }
 
     #[pymethods]
@@ -1496,7 +1500,7 @@ mod python_bindings {
                 labels: None, centroids: None, fitted_d: 0, objective: None, n_iter: None,
                 representatives: None, intra_similarity: None, resultant_lengths: None,
                 vmf_probabilities: None, vmf_concentrations: None, vmf_bic: None,
-                pca_projection: None,
+                pca_projection: None, reduced_data: None, reduced_n: 0, reduced_d: 0,
             })
         }
 
@@ -1557,6 +1561,13 @@ mod python_bindings {
             });
             py.check_signals()?;
 
+            // Cache reduced data if reduction was performed
+            let cached_reduced = if work_d != d {
+                Some((work_data.clone(), n, work_d))
+            } else {
+                None
+            };
+
             // Stage 3: Spherical K-means (GIL released)
             let skmeans = py.allow_threads(|| {
                 spherical_kmeans::run_spherical_kmeans(
@@ -1584,6 +1595,15 @@ mod python_bindings {
             self.intra_similarity = Some(intra_sim);
             self.resultant_lengths = Some(res_lens);
             self.pca_projection = pca_proj;
+            if let Some((rd, rn, rdim)) = cached_reduced {
+                self.reduced_data = Some(rd);
+                self.reduced_n = rn;
+                self.reduced_d = rdim;
+            } else {
+                self.reduced_data = None;
+                self.reduced_n = 0;
+                self.reduced_d = 0;
+            }
             self.vmf_probabilities = None;
             self.vmf_concentrations = None;
             self.vmf_bic = None;
@@ -1694,11 +1714,154 @@ mod python_bindings {
             self.vmf_bic.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call refine_vmf() first").into())
         }
 
+        #[getter]
+        fn reduced_data_<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+            match self.reduced_data {
+                Some(ref data) => {
+                    let arr = ndarray::Array2::from_shape_vec(
+                        (self.reduced_n, self.reduced_d),
+                        data.clone(),
+                    ).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+                    Ok(PyArray2::from_owned_array(py, arr).into_any().unbind())
+                }
+                None => Ok(py.None()),
+            }
+        }
+
         fn __repr__(&self) -> String {
             format!(
                 "EmbeddingCluster(n_clusters={}, reduction_dim={:?}, max_iter={}, n_init={})",
                 self.n_clusters, self.reduction_dim, self.max_iter, self.n_init
             )
+        }
+    }
+
+    // ---- EmbeddingReducer ----
+
+    #[pyclass]
+    struct EmbeddingReducer {
+        target_dim: usize,
+        method: String,
+        seed: u64,
+        state: Option<reducer::EmbeddingReducerState>,
+    }
+
+    #[pymethods]
+    impl EmbeddingReducer {
+        #[new]
+        #[pyo3(signature = (target_dim=128, method="pca", random_state=0))]
+        fn new(target_dim: usize, method: &str, random_state: u64) -> PyResult<Self> {
+            let method_str = method.to_lowercase();
+            if method_str != "pca" && method_str != "matryoshka" {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    format!("method must be 'pca' or 'matryoshka', got '{}'", method)
+                ));
+            }
+            Ok(EmbeddingReducer {
+                target_dim,
+                method: method_str,
+                seed: random_state,
+                state: None,
+            })
+        }
+
+        fn fit(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
+            let (data_f64, n, d) = extract_f64_2d(x)?;
+            let target_dim = self.target_dim;
+            let seed = self.seed;
+            let method = self.method.clone();
+
+            let state = py.allow_threads(move || {
+                match method.as_str() {
+                    "pca" => reducer::fit_pca(&data_f64, n, d, target_dim, seed),
+                    "matryoshka" => reducer::fit_matryoshka(d, target_dim),
+                    _ => unreachable!(),
+                }
+            });
+
+            self.state = Some(state);
+            Ok(())
+        }
+
+        fn transform<'py>(&self, py: Python<'py>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+            let state = self.state.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Call fit() before transform()")
+            })?;
+            let (data_f64, n, d) = extract_f64_2d(x)?;
+            let state_method = state.method.clone();
+            let state_input_dim = state.input_dim;
+            let state_target_dim = state.target_dim;
+            let state_mean = state.mean.clone();
+            let state_components = state.components.clone();
+
+            let result = py.allow_threads(move || {
+                let st = reducer::EmbeddingReducerState {
+                    method: state_method,
+                    input_dim: state_input_dim,
+                    target_dim: state_target_dim,
+                    mean: state_mean,
+                    components: state_components,
+                };
+                reducer::transform(&data_f64, n, d, &st)
+            }).map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+
+            let target = self.state.as_ref().unwrap().target_dim;
+            let n_out = result.len() / target;
+            let arr = ndarray::Array2::from_shape_vec((n_out, target), result)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            Ok(PyArray2::from_owned_array(py, arr))
+        }
+
+        fn fit_transform<'py>(&mut self, py: Python<'py>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+            self.fit(py, x)?;
+            self.transform(py, x)
+        }
+
+        fn save(&self, path: &str) -> PyResult<()> {
+            let state = self.state.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Call fit() before save()")
+            })?;
+            reducer::save_state(state, path)
+                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e))
+        }
+
+        #[staticmethod]
+        fn load(path: &str) -> PyResult<Self> {
+            let state = reducer::load_state(path)
+                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+            let target_dim = state.target_dim;
+            let method = state.method.clone();
+            Ok(EmbeddingReducer {
+                target_dim,
+                method,
+                seed: 0,
+                state: Some(state),
+            })
+        }
+
+        fn __repr__(&self) -> String {
+            let fitted = if self.state.is_some() { "fitted" } else { "unfitted" };
+            format!(
+                "EmbeddingReducer(target_dim={}, method='{}', {})",
+                self.target_dim, self.method, fitted
+            )
+        }
+    }
+
+    /// Helper: extract a 2D array as Vec<f64> + (n, d).
+    fn extract_f64_2d(x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<(Vec<f64>, usize, usize)> {
+        if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+            let view = arr.as_array();
+            let (n, d) = view.dim();
+            let data: Vec<f64> = view.as_slice().expect("contiguous").iter().map(|&v| v as f64).collect();
+            Ok((data, n, d))
+        } else if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
+            let view = arr.as_array();
+            let (n, d) = view.dim();
+            let data: Vec<f64> = view.as_slice().expect("contiguous").to_vec();
+            Ok((data, n, d))
+        } else {
+            Err(pyo3::exceptions::PyValueError::new_err("Expected float32 or float64 array"))
         }
     }
 
@@ -1781,6 +1944,7 @@ mod python_bindings {
         m.add_class::<Hdbscan>()?;
         m.add_class::<AgglomerativeClustering>()?;
         m.add_class::<EmbeddingCluster>()?;
+        m.add_class::<EmbeddingReducer>()?;
         m.add_function(wrap_pyfunction!(silhouette_score, m)?)?;
         m.add_function(wrap_pyfunction!(calinski_harabasz_score, m)?)?;
         m.add_function(wrap_pyfunction!(davies_bouldin_score, m)?)?;

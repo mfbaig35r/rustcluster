@@ -8,6 +8,7 @@
 pub mod evaluation;
 pub mod fusion;
 pub mod normalize;
+pub mod reducer;
 pub mod reduction;
 pub mod spherical_hamerly;
 pub mod spherical_kmeans;

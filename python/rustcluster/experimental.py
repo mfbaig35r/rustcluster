@@ -6,8 +6,9 @@ These APIs may change between versions.
 import numpy as np
 
 from rustcluster._rustcluster import EmbeddingCluster as _RustEmbeddingCluster
+from rustcluster._rustcluster import EmbeddingReducer as _RustEmbeddingReducer
 
-__all__ = ["EmbeddingCluster"]
+__all__ = ["EmbeddingCluster", "EmbeddingReducer"]
 
 
 def _prepare(X):
@@ -131,6 +132,14 @@ class EmbeddingCluster:
         return self._model.resultant_lengths_
 
     @property
+    def reduced_data_(self):
+        """PCA-reduced, L2-normalized data. None if no reduction was performed."""
+        val = self._model.reduced_data_
+        if val is None:
+            return None
+        return np.array(val, copy=True)
+
+    @property
     def probabilities_(self):
         """Soft cluster membership (n, k). Call refine_vmf() first."""
         return self._model.probabilities_
@@ -151,3 +160,113 @@ class EmbeddingCluster:
             f"reduction_dim={self._reduction_dim}, max_iter={self._max_iter}, "
             f"n_init={self._n_init})"
         )
+
+
+class EmbeddingReducer:
+    """Standalone dimensionality reducer for embedding vectors.
+
+    Wraps randomized PCA (or Matryoshka truncation) as a reusable artifact.
+    Fit once, save, then iterate on clustering for free.
+
+    Output is always L2-normalized to preserve cosine geometry.
+
+    Parameters
+    ----------
+    target_dim : int, default=128
+        Target output dimensionality.
+    method : str, default="pca"
+        Reduction method: "pca" (randomized PCA) or "matryoshka" (prefix truncation).
+    random_state : int, default=0
+        Seed for reproducibility (PCA only).
+    """
+
+    def __init__(self, target_dim=128, method="pca", random_state=0):
+        self._model = _RustEmbeddingReducer(
+            target_dim=target_dim,
+            method=method,
+            random_state=random_state,
+        )
+        self._target_dim = target_dim
+        self._method = method
+
+    def fit(self, X):
+        """Fit the reducer on embedding data.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Embedding vectors.
+
+        Returns
+        -------
+        self
+        """
+        X = _prepare(X)
+        self._model.fit(X)
+        return self
+
+    def transform(self, X):
+        """Transform data using the fitted reducer.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Embedding vectors (must have same n_features as fit data).
+
+        Returns
+        -------
+        X_reduced : ndarray of shape (n_samples, target_dim)
+            L2-normalized reduced embeddings.
+        """
+        X = _prepare(X)
+        return np.asarray(self._model.transform(X))
+
+    def fit_transform(self, X):
+        """Fit and transform in one call.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Embedding vectors.
+
+        Returns
+        -------
+        X_reduced : ndarray of shape (n_samples, target_dim)
+            L2-normalized reduced embeddings.
+        """
+        X = _prepare(X)
+        return np.asarray(self._model.fit_transform(X))
+
+    def save(self, path):
+        """Save fitted state to a binary file.
+
+        Parameters
+        ----------
+        path : str
+            File path (e.g., "pca_128.bin").
+        """
+        self._model.save(str(path))
+
+    @classmethod
+    def load(cls, path):
+        """Load a fitted reducer from a binary file.
+
+        Parameters
+        ----------
+        path : str
+            File path.
+
+        Returns
+        -------
+        EmbeddingReducer
+            Fitted reducer ready for transform().
+        """
+        rust_model = _RustEmbeddingReducer.load(str(path))
+        obj = cls.__new__(cls)
+        obj._model = rust_model
+        obj._target_dim = rust_model.target_dim if hasattr(rust_model, 'target_dim') else None
+        obj._method = None
+        return obj
+
+    def __repr__(self):
+        return repr(self._model)
