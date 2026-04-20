@@ -1,17 +1,20 @@
 # rustcluster
 
-Fast, Rust-backed clustering for Python. Five algorithms, sklearn-compatible API, 1.3-6.4x faster K-means.
+Fast, Rust-backed clustering for Python. Six algorithms, sklearn-compatible API, purpose-built embedding clustering with 11x PCA speedup.
 
 ## Highlights
 
-- **5 algorithms**: KMeans (Lloyd + Hamerly), MiniBatchKMeans, DBSCAN, HDBSCAN, AgglomerativeClustering
+- **6 algorithms**: KMeans, MiniBatchKMeans, DBSCAN, HDBSCAN, AgglomerativeClustering, EmbeddingCluster
+- **EmbeddingCluster** — purpose-built pipeline for OpenAI/Cohere/Voyage embeddings (L2-normalize → PCA → spherical K-means)
+- **EmbeddingReducer** — standalone PCA transformer with save/load (fit once, cluster for free)
+- **faer-accelerated PCA** — 11x faster than hand-rolled matmul via SIMD-optimized GEMM
 - **3 distance metrics**: euclidean, cosine, manhattan
 - **3 evaluation metrics**: silhouette score, Calinski-Harabasz, Davies-Bouldin
 - **KD-tree acceleration** for DBSCAN/HDBSCAN neighbor queries (10-200x on low-d data)
 - **Native f32/f64** — no silent upcast, doubles cache efficiency with f32
 - **Pickle serialization** for all fitted models
 - **GIL released** during all compute — plays well with threads and async
-- **320 tests** across Rust and Python
+- **416 tests** across Rust and Python
 
 ## Installation
 
@@ -19,7 +22,7 @@ Fast, Rust-backed clustering for Python. Five algorithms, sklearn-compatible API
 pip install rustcluster
 ```
 
-Or from source (requires [Rust toolchain](https://rustup.rs/) + Python 3.9+):
+Or from source (requires [Rust toolchain](https://rustup.rs/) + Python 3.10+):
 
 ```bash
 pip install maturin
@@ -42,6 +45,51 @@ model.cluster_centers_  # centroids (k x d)
 model.inertia_          # sum of squared distances
 model.predict(X_new)    # assign new data
 ```
+
+### Embedding Clustering
+
+Purpose-built pipeline for dense embedding vectors (OpenAI, Cohere, Voyage, etc.):
+
+```python
+from rustcluster.experimental import EmbeddingCluster
+
+model = EmbeddingCluster(n_clusters=50, reduction_dim=128)
+model.fit(embeddings)          # L2-normalize → PCA → spherical K-means
+model.labels_                  # cluster assignments
+model.cluster_centers_         # unit-norm centroids in reduced space
+model.intra_similarity_        # per-cluster cosine similarity
+model.reduced_data_            # access PCA-reduced data
+```
+
+### EmbeddingReducer (Fit Once, Cluster Many)
+
+PCA is 99% of the embedding pipeline runtime. Separate reduction from clustering to iterate for free:
+
+```python
+from rustcluster.experimental import EmbeddingReducer
+
+# Pay the PCA cost once
+reducer = EmbeddingReducer(target_dim=128)
+X_reduced = reducer.fit_transform(embeddings)  # 323K × 1536 → 128 in ~56s
+reducer.save("pca_128.bin")
+
+# Iterate on clustering for free
+reducer = EmbeddingReducer.load("pca_128.bin")
+X_reduced = reducer.transform(new_embeddings)
+
+EmbeddingCluster(n_clusters=50, reduction_dim=None).fit(X_reduced)   # ~4s
+EmbeddingCluster(n_clusters=100, reduction_dim=None).fit(X_reduced)  # ~8s
+EmbeddingCluster(n_clusters=200, reduction_dim=None).fit(X_reduced)  # ~15s
+```
+
+Matryoshka models (e.g., text-embedding-3-small) can skip PCA entirely:
+
+```python
+reducer = EmbeddingReducer(target_dim=128, method="matryoshka")
+X_reduced = reducer.fit_transform(embeddings)  # instant — just truncates + L2-normalizes
+```
+
+See the [embedding clustering guide](docs/embedding-clustering-guide.md) for full documentation.
 
 ### Mini-Batch K-Means
 
@@ -117,7 +165,9 @@ Ward linkage requires euclidean metric.
 
 ## Performance
 
-K-means benchmark vs scikit-learn (single-threaded, `n_init=1`, median of 5 runs):
+### K-Means vs scikit-learn
+
+Single-threaded, `n_init=1`, median of 5 runs:
 
 | n | d | k | Speedup vs sklearn |
 |---|---|---|---|
@@ -128,7 +178,18 @@ K-means benchmark vs scikit-learn (single-threaded, `n_init=1`, median of 5 runs
 
 DBSCAN and HDBSCAN use KD-tree acceleration for `d <= 16` with euclidean or manhattan metrics, reducing neighbor queries from O(n^2) to O(n log n).
 
-Full benchmark: `python benches/benchmark.py`
+### Embedding Clustering
+
+Measured on 323K embeddings (text-embedding-3-small, 1536d → 128d, K=98, Apple Silicon):
+
+| Workflow | Time |
+|----------|------|
+| Full pipeline (PCA + cluster) | **58s** |
+| Subsequent run (cached reduced data) | **7.5s** |
+| 5 clustering configs on cached data | **74s** |
+| Matryoshka (no PCA needed) | **~5s** |
+
+Full benchmarks: `python benches/benchmark.py`
 
 ## Serialization
 
@@ -142,12 +203,19 @@ data = pickle.dumps(model)
 model_restored = pickle.loads(data)  # fitted state preserved
 ```
 
+EmbeddingReducer uses a compact binary format:
+
+```python
+reducer.save("pca_128.bin")                   # 1.5 KB
+reducer = EmbeddingReducer.load("pca_128.bin") # instant
+```
+
 ## Development
 
 ```bash
 maturin develop --release              # build
-cargo test --no-default-features --lib # Rust tests (128)
-pytest tests/ -v                       # Python tests (192)
+cargo test --no-default-features --lib # Rust tests (182)
+pytest tests/ -v                       # Python tests (234)
 python benches/benchmark.py            # benchmark vs sklearn
 cargo fmt -- --check                   # formatting
 cargo clippy --no-default-features --lib -- -D warnings  # linting
@@ -160,6 +228,10 @@ Three-layer kernel design separating concerns:
 1. **PyO3 boundary** (`src/lib.rs`) — input validation, GIL release, dtype dispatch
 2. **Algorithm logic** (`src/kmeans.rs`, etc.) — iteration, convergence, ndarray types
 3. **Hot kernel** (`src/utils.rs`, `src/distance.rs`) — raw `&[F]` slices for auto-vectorization
+
+The embedding pipeline adds:
+
+4. **Embedding module** (`src/embedding/`) — spherical K-means, PCA (faer-backed), vMF refinement, EmbeddingReducer
 
 See [docs/architecture-decisions.md](docs/architecture-decisions.md) for details and [docs/lessons-building-rustcluster.md](docs/lessons-building-rustcluster.md) for the full build story.
 
