@@ -1,5 +1,9 @@
 """rustcluster — Rust-backed Python clustering library."""
 
+from importlib.metadata import version as _get_version
+
+__version__ = _get_version("rustcluster")
+
 import numpy as np
 
 from rustcluster._rustcluster import KMeans as _RustKMeans
