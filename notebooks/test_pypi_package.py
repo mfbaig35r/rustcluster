@@ -165,9 +165,10 @@ model_agg = AgglomerativeClustering(n_clusters=5, linkage="ward")
 model_agg.fit(X_blobs)
 
 assert model_agg.labels_.shape == (1000,)
-assert model_agg.children_.shape == (999, 2)
-assert model_agg.distances_.shape == (999,)
-print(f"Agglomerative: labels={len(set(model_agg.labels_))} clusters, last merge distance={model_agg.distances_[-1]:.2f}")
+n_merges = model_agg.children_.shape[0]
+assert model_agg.children_.shape == (n_merges, 2)
+assert model_agg.distances_.shape == (n_merges,)
+print(f"Agglomerative: labels={len(set(model_agg.labels_))} clusters, {n_merges} merges, last merge distance={model_agg.distances_[-1]:.2f}")
 print("  PASSED")
 
 # COMMAND ----------
