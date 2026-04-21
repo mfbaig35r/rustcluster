@@ -14,7 +14,7 @@ Fast, Rust-backed clustering for Python. Six algorithms, sklearn-compatible API,
 - **Native f32/f64** — no silent upcast, doubles cache efficiency with f32
 - **Pickle serialization** for all fitted models
 - **GIL released** during all compute — plays well with threads and async
-- **416 tests** across Rust and Python
+- **421 tests** across Rust and Python
 
 ## Installation
 
@@ -215,7 +215,7 @@ reducer = EmbeddingReducer.load("pca_128.bin") # instant
 ```bash
 maturin develop --release              # build
 cargo test --no-default-features --lib # Rust tests (182)
-pytest tests/ -v                       # Python tests (234)
+pytest tests/ -v                       # Python tests (239)
 python benches/benchmark.py            # benchmark vs sklearn
 cargo fmt -- --check                   # formatting
 cargo clippy --no-default-features --lib -- -D warnings  # linting
