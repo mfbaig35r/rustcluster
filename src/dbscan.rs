@@ -4,8 +4,8 @@
 //! 1. Parallel neighborhood scan — find all neighbors within eps for each point
 //! 2. Sequential BFS cluster expansion — grow clusters through core points
 //!
-//! Complexity: O(n^2) for the naive neighbor scan. Spatial indexing (KD-tree)
-//! would improve to O(n log n) average-case for low dimensions — future work.
+//! Complexity: O(n^2) worst-case. KD-tree acceleration (d <= 16, Euclidean/Manhattan)
+//! reduces to O(n log n) average-case; falls back to brute force for high-d or Cosine.
 
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;

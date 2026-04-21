@@ -412,17 +412,21 @@ fn condense_and_extract(
     let mut node_size: Vec<usize> = vec![1; n_nodes]; // leaves have size 1
     let mut lambda_birth: Vec<f64> = vec![0.0; n_nodes];
 
-    // Map original UF root IDs to internal node IDs
-    let mut root_to_node: std::collections::HashMap<usize, usize> =
-        std::collections::HashMap::new();
-    for i in 0..n {
-        root_to_node.insert(i, i); // initially each point is its own node
-    }
+    // Map original UF root IDs to internal node IDs (keys are 0..n)
+    let mut root_to_node: Vec<usize> = (0..n).collect();
 
     for (idx, &(child_a, child_b, distance, size)) in hierarchy.iter().enumerate() {
         let internal_id = n + idx;
-        let node_a = *root_to_node.get(&child_a).unwrap_or(&child_a);
-        let node_b = *root_to_node.get(&child_b).unwrap_or(&child_b);
+        let node_a = if child_a < n {
+            root_to_node[child_a]
+        } else {
+            child_a
+        };
+        let node_b = if child_b < n {
+            root_to_node[child_b]
+        } else {
+            child_b
+        };
 
         children[internal_id] = (node_a, node_b);
         node_size[internal_id] = size;
@@ -435,43 +439,39 @@ fn condense_and_extract(
         lambda_birth[internal_id] = lambda;
 
         // The merged root now maps to this internal node
-        // Find which root survived the union in the original UF
-        // Since we process in order, update both roots to point to new node
-        root_to_node.insert(child_a, internal_id);
-        root_to_node.insert(child_b, internal_id);
+        if child_a < n {
+            root_to_node[child_a] = internal_id;
+        }
+        if child_b < n {
+            root_to_node[child_b] = internal_id;
+        }
     }
 
     let root = n + n_merges - 1; // the final merge is the root
 
     // Condense: walk top-down, collecting "condensed clusters"
-    // A condensed cluster is one where both children have size >= min_cluster_size (a real split)
-    // or a leaf-level cluster.
 
-    // For each point, track which condensed cluster it belongs to and its lambda_p (when it "fell out")
-    let mut point_cluster: Vec<usize> = vec![root; n]; // which condensed cluster each point belongs to
-    let mut point_lambda: Vec<f64> = vec![0.0; n]; // lambda at which each point was last assigned
+    // For each point, track which condensed cluster it belongs to and its lambda_p
+    let mut point_cluster: Vec<usize> = vec![root; n];
+    let mut point_lambda: Vec<f64> = vec![0.0; n];
 
-    // Condensed cluster info
-    let mut condensed_clusters: Vec<usize> = vec![root]; // IDs of condensed clusters
-    let mut cluster_lambda_birth: std::collections::HashMap<usize, f64> =
-        std::collections::HashMap::new();
-    let mut cluster_lambda_death: std::collections::HashMap<usize, f64> =
-        std::collections::HashMap::new();
-    let mut cluster_stability: std::collections::HashMap<usize, f64> =
-        std::collections::HashMap::new();
-    let mut cluster_children: std::collections::HashMap<usize, Vec<usize>> =
-        std::collections::HashMap::new();
+    // Condensed cluster info — indexed by node ID (0..n_nodes)
+    let mut condensed_clusters: Vec<usize> = vec![root];
+    let mut cluster_lambda_birth: Vec<f64> = vec![0.0; n_nodes];
+    let mut cluster_lambda_death: Vec<f64> = vec![f64::NAN; n_nodes]; // NAN = not yet set
+    let mut cluster_stability: Vec<f64> = vec![0.0; n_nodes];
+    let mut cluster_children: Vec<Vec<usize>> = vec![vec![]; n_nodes];
 
-    cluster_lambda_birth.insert(root, lambda_birth[root]);
+    cluster_lambda_birth[root] = lambda_birth[root];
 
     // BFS/DFS to condense the tree
-    let mut stack: Vec<(usize, usize)> = vec![(root, root)]; // (node, current_condensed_cluster)
+    let mut stack: Vec<(usize, usize)> = vec![(root, root)];
 
     while let Some((node, current_cluster)) = stack.pop() {
         if node < n {
             // Leaf node (data point)
             point_cluster[node] = current_cluster;
-            point_lambda[node] = *cluster_lambda_birth.get(&current_cluster).unwrap_or(&0.0);
+            point_lambda[node] = cluster_lambda_birth[current_cluster];
             continue;
         }
 
@@ -485,28 +485,18 @@ fn condense_and_extract(
 
         if left_big && right_big {
             // Real split: both children become new condensed clusters
-            cluster_lambda_death.insert(current_cluster, lambda);
+            cluster_lambda_death[current_cluster] = lambda;
 
-            // Left child becomes a new condensed cluster
             condensed_clusters.push(left);
-            cluster_lambda_birth.insert(left, lambda);
-            cluster_children
-                .entry(current_cluster)
-                .or_default()
-                .push(left);
+            cluster_lambda_birth[left] = lambda;
+            cluster_children[current_cluster].push(left);
             stack.push((left, left));
 
-            // Right child becomes a new condensed cluster
             condensed_clusters.push(right);
-            cluster_lambda_birth.insert(right, lambda);
-            cluster_children
-                .entry(current_cluster)
-                .or_default()
-                .push(right);
+            cluster_lambda_birth[right] = lambda;
+            cluster_children[current_cluster].push(right);
             stack.push((right, right));
         } else if left_big {
-            // Only left is big enough — right's points "fall out" as noise candidates
-            // Assign right subtree points with their lambda
             assign_subtree_points(
                 right,
                 n,
@@ -529,7 +519,6 @@ fn condense_and_extract(
             );
             stack.push((right, current_cluster));
         } else {
-            // Neither child is big enough — all points fall out
             assign_subtree_points(
                 left,
                 n,
@@ -553,26 +542,25 @@ fn condense_and_extract(
 
     // Set lambda_death for leaf condensed clusters (those that were never split)
     for &c in &condensed_clusters {
-        if !cluster_lambda_death.contains_key(&c) {
-            // Find max lambda among its points
+        if cluster_lambda_death[c].is_nan() {
             let max_lambda = (0..n)
                 .filter(|&i| point_cluster[i] == c)
                 .map(|i| point_lambda[i])
                 .fold(0.0f64, f64::max);
-            let birth = *cluster_lambda_birth.get(&c).unwrap_or(&0.0);
-            cluster_lambda_death.insert(c, max_lambda.max(birth));
+            let birth = cluster_lambda_birth[c];
+            cluster_lambda_death[c] = max_lambda.max(birth);
         }
     }
 
     // Compute stability for each condensed cluster
     for &c in &condensed_clusters {
-        let birth = *cluster_lambda_birth.get(&c).unwrap_or(&0.0);
+        let birth = cluster_lambda_birth[c];
         let stability: f64 = (0..n)
             .filter(|&i| point_cluster[i] == c)
             .map(|i| point_lambda[i] - birth)
             .filter(|&v| v > 0.0)
             .sum();
-        cluster_stability.insert(c, stability.max(0.0));
+        cluster_stability[c] = stability.max(0.0);
     }
 
     // Stage 6: Extract flat clusters
@@ -589,10 +577,10 @@ fn condense_and_extract(
     let mut persistence = Vec::new();
 
     for (cluster_label, &cluster_id) in selected.iter().enumerate() {
-        let birth = *cluster_lambda_birth.get(&cluster_id).unwrap_or(&0.0);
-        let death = *cluster_lambda_death.get(&cluster_id).unwrap_or(&0.0);
+        let birth = cluster_lambda_birth[cluster_id];
+        let death = cluster_lambda_death[cluster_id];
         let span = (death - birth).max(1e-15);
-        let stab = *cluster_stability.get(&cluster_id).unwrap_or(&0.0);
+        let stab = cluster_stability[cluster_id];
         persistence.push(stab);
 
         for i in 0..n {
@@ -631,54 +619,37 @@ fn assign_subtree_points(
 }
 
 /// EOM (Excess of Mass) cluster selection: bottom-up stability propagation.
-fn select_eom(
-    clusters: &[usize],
-    stability: &std::collections::HashMap<usize, f64>,
-    children_map: &std::collections::HashMap<usize, Vec<usize>>,
-) -> Vec<usize> {
-    // Find leaf clusters (no children in the condensed tree)
+fn select_eom(clusters: &[usize], stability: &[f64], children_map: &[Vec<usize>]) -> Vec<usize> {
     let mut selected: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut propagated_stability: std::collections::HashMap<usize, f64> = stability.clone();
+    let mut propagated_stability: Vec<f64> = stability.to_vec();
 
     // Process bottom-up: iterate clusters in reverse order (leaves first)
     let mut ordered = clusters.to_vec();
     ordered.reverse();
 
     for &c in &ordered {
-        let child_list = children_map.get(&c);
-        let is_leaf = match child_list {
-            None => true,
-            Some(v) => v.is_empty(),
-        };
-        if is_leaf {
+        let child_ids = &children_map[c];
+        if child_ids.is_empty() {
             // Leaf condensed cluster — always selected initially
             selected.insert(c);
         } else {
-            let child_ids = child_list.unwrap();
-            {
-                let children_total: f64 = child_ids
-                    .iter()
-                    .map(|ch| propagated_stability.get(ch).unwrap_or(&0.0))
-                    .sum();
-                let own_stability = *stability.get(&c).unwrap_or(&0.0);
+            let children_total: f64 = child_ids.iter().map(|&ch| propagated_stability[ch]).sum();
+            let own_stability = stability[c];
 
-                if own_stability >= children_total {
-                    // This cluster is better than its children combined
-                    selected.insert(c);
-                    // Deselect all descendants
-                    for ch in child_ids {
-                        deselect_subtree(*ch, children_map, &mut selected);
-                    }
-                    propagated_stability.insert(c, own_stability);
-                } else {
-                    // Children are better — propagate their stability up
-                    propagated_stability.insert(c, children_total);
+            if own_stability >= children_total {
+                // This cluster is better than its children combined
+                selected.insert(c);
+                for &ch in child_ids {
+                    deselect_subtree(ch, children_map, &mut selected);
                 }
+                propagated_stability[c] = own_stability;
+            } else {
+                // Children are better — propagate their stability up
+                propagated_stability[c] = children_total;
             }
         }
     }
 
-    // Filter to only actually selected clusters and sort for deterministic label order
     let mut result: Vec<usize> = selected.into_iter().collect();
     result.sort();
     result
@@ -686,25 +657,20 @@ fn select_eom(
 
 fn deselect_subtree(
     node: usize,
-    children_map: &std::collections::HashMap<usize, Vec<usize>>,
+    children_map: &[Vec<usize>],
     selected: &mut std::collections::HashSet<usize>,
 ) {
     selected.remove(&node);
-    if let Some(children) = children_map.get(&node) {
-        for &ch in children {
-            deselect_subtree(ch, children_map, selected);
-        }
+    for &ch in &children_map[node] {
+        deselect_subtree(ch, children_map, selected);
     }
 }
 
 /// Leaf cluster selection: select all condensed clusters with no children.
-fn select_leaf(
-    clusters: &[usize],
-    children_map: &std::collections::HashMap<usize, Vec<usize>>,
-) -> Vec<usize> {
+fn select_leaf(clusters: &[usize], children_map: &[Vec<usize>]) -> Vec<usize> {
     let mut result: Vec<usize> = clusters
         .iter()
-        .filter(|&&c| children_map.get(&c).map_or(true, |v| v.is_empty()))
+        .filter(|&&c| children_map[c].is_empty())
         .copied()
         .collect();
     result.sort();

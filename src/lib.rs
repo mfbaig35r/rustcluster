@@ -40,6 +40,34 @@ mod python_bindings {
     };
     use crate::utils::{assign_nearest_with, validate_predict_data, validate_predict_data_generic};
 
+    /// Extract a 2D array as f64 or f32, run a closure inside `allow_threads`,
+    /// and store the result in the given fitted-state enum variant.
+    macro_rules! dispatch_fit {
+        ($self:expr, $py:expr, $x:expr, $Enum:ident, $run_f64:expr, $run_f32:expr) => {{
+            if let Ok(arr) = $x.extract::<PyReadonlyArray2<'_, f64>>() {
+                if !arr.is_c_contiguous() {
+                    return Err(ClusterError::NotContiguous.into());
+                }
+                let view = arr.as_array();
+                let state = $py.allow_threads(move || $run_f64(view))?;
+                $self.fitted = Some($Enum::F64(state));
+                return Ok(());
+            }
+            if let Ok(arr) = $x.extract::<PyReadonlyArray2<'_, f32>>() {
+                if !arr.is_c_contiguous() {
+                    return Err(ClusterError::NotContiguous.into());
+                }
+                let view = arr.as_array();
+                let state = $py.allow_threads(move || $run_f32(view))?;
+                $self.fitted = Some($Enum::F32(state));
+                return Ok(());
+            }
+            Err(pyo3::exceptions::PyValueError::new_err(
+                "Expected a C-contiguous float32 or float64 NumPy array",
+            ))
+        }};
+    }
+
     // ---- KMeans ----
 
     enum FittedState {
@@ -109,31 +137,16 @@ mod python_bindings {
             let algo = self.algorithm;
             let metric = self.metric;
 
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state = py.allow_threads(move || {
-                    run_kmeans_with_metric(&view, k, max_iter, tol, seed, n_init, algo, metric)
-                })?;
-                self.fitted = Some(FittedState::F64(state));
-                return Ok(());
-            }
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state = py.allow_threads(move || {
-                    run_kmeans_with_metric_f32(&view, k, max_iter, tol, seed, n_init, algo, metric)
-                })?;
-                self.fitted = Some(FittedState::F32(state));
-                return Ok(());
-            }
-            Err(pyo3::exceptions::PyValueError::new_err(
-                "Expected a C-contiguous float32 or float64 NumPy array",
-            ))
+            dispatch_fit!(
+                self,
+                py,
+                x,
+                FittedState,
+                |view| run_kmeans_with_metric(&view, k, max_iter, tol, seed, n_init, algo, metric),
+                |view| run_kmeans_with_metric_f32(
+                    &view, k, max_iter, tol, seed, n_init, algo, metric
+                )
+            )
         }
 
         fn predict<'py>(
@@ -471,31 +484,14 @@ mod python_bindings {
             let min_samples = self.min_samples;
             let metric = self.metric;
 
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state = py.allow_threads(move || {
-                    run_dbscan_with_metric(&view, eps, min_samples, metric)
-                })?;
-                self.fitted = Some(DbscanFitted::F64(state));
-                return Ok(());
-            }
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state = py.allow_threads(move || {
-                    run_dbscan_with_metric_f32(&view, eps, min_samples, metric)
-                })?;
-                self.fitted = Some(DbscanFitted::F32(state));
-                return Ok(());
-            }
-            Err(pyo3::exceptions::PyValueError::new_err(
-                "Expected a C-contiguous float32 or float64 NumPy array",
-            ))
+            dispatch_fit!(
+                self,
+                py,
+                x,
+                DbscanFitted,
+                |view| run_dbscan_with_metric(&view, eps, min_samples, metric),
+                |view| run_dbscan_with_metric_f32(&view, eps, min_samples, metric)
+            )
         }
 
         fn fit_predict<'py>(
@@ -710,30 +706,14 @@ mod python_bindings {
             let metric = self.metric;
             let sel = self.cluster_selection_method;
 
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state =
-                    py.allow_threads(move || run_hdbscan_with_metric(&view, mcs, ms, metric, sel))?;
-                self.fitted = Some(HdbscanFitted::F64(state));
-                return Ok(());
-            }
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state = py.allow_threads(move || {
-                    run_hdbscan_with_metric_f32(&view, mcs, ms, metric, sel)
-                })?;
-                self.fitted = Some(HdbscanFitted::F32(state));
-                return Ok(());
-            }
-            Err(pyo3::exceptions::PyValueError::new_err(
-                "Expected float32 or float64 array",
-            ))
+            dispatch_fit!(
+                self,
+                py,
+                x,
+                HdbscanFitted,
+                |view| run_hdbscan_with_metric(&view, mcs, ms, metric, sel),
+                |view| run_hdbscan_with_metric_f32(&view, mcs, ms, metric, sel)
+            )
         }
 
         fn fit_predict<'py>(
@@ -914,31 +894,14 @@ mod python_bindings {
             let link = self.linkage;
             let metric = self.metric;
 
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state = py.allow_threads(move || {
-                    run_agglomerative_with_metric(&view, nc, link, metric)
-                })?;
-                self.fitted = Some(AgglomerativeFitted::F64(state));
-                return Ok(());
-            }
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state = py.allow_threads(move || {
-                    run_agglomerative_with_metric_f32(&view, nc, link, metric)
-                })?;
-                self.fitted = Some(AgglomerativeFitted::F32(state));
-                return Ok(());
-            }
-            Err(pyo3::exceptions::PyValueError::new_err(
-                "Expected float32 or float64 array",
-            ))
+            dispatch_fit!(
+                self,
+                py,
+                x,
+                AgglomerativeFitted,
+                |view| run_agglomerative_with_metric(&view, nc, link, metric),
+                |view| run_agglomerative_with_metric_f32(&view, nc, link, metric)
+            )
         }
 
         fn fit_predict<'py>(
@@ -1162,31 +1125,16 @@ mod python_bindings {
             let mni = self.max_no_improvement;
             let metric = self.metric;
 
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state = py.allow_threads(move || {
-                    run_minibatch_kmeans_with_metric(&view, k, bs, mi, tol, seed, mni, metric)
-                })?;
-                self.fitted = Some(MiniBatchFittedState::F64(state));
-                return Ok(());
-            }
-            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
-                if !arr.is_c_contiguous() {
-                    return Err(ClusterError::NotContiguous.into());
-                }
-                let view = arr.as_array();
-                let state = py.allow_threads(move || {
-                    run_minibatch_kmeans_with_metric_f32(&view, k, bs, mi, tol, seed, mni, metric)
-                })?;
-                self.fitted = Some(MiniBatchFittedState::F32(state));
-                return Ok(());
-            }
-            Err(pyo3::exceptions::PyValueError::new_err(
-                "Expected float32 or float64 array",
-            ))
+            dispatch_fit!(
+                self,
+                py,
+                x,
+                MiniBatchFittedState,
+                |view| run_minibatch_kmeans_with_metric(&view, k, bs, mi, tol, seed, mni, metric),
+                |view| run_minibatch_kmeans_with_metric_f32(
+                    &view, k, bs, mi, tol, seed, mni, metric
+                )
+            )
         }
 
         fn predict<'py>(
@@ -1470,6 +1418,30 @@ mod python_bindings {
 
     use crate::embedding::{evaluation, normalize, reducer, reduction, spherical_kmeans, vmf};
 
+    /// Core fitted state from spherical K-means + evaluation.
+    struct EmbeddingClusterFitted {
+        labels: Vec<usize>,
+        centroids: Vec<f64>, // flat, unit-norm, in reduced space
+        fitted_d: usize,
+        objective: f64,
+        n_iter: usize,
+        representatives: Vec<usize>,
+        intra_similarity: Vec<f64>,
+        resultant_lengths: Vec<f64>,
+        pca_projection: Option<reduction::PcaProjection>,
+        // Ephemeral cache (not serialized)
+        reduced_data: Option<Vec<f64>>,
+        reduced_n: usize,
+        reduced_d: usize,
+    }
+
+    /// Optional vMF refinement state.
+    struct VmfState {
+        probabilities: Vec<f64>,
+        concentrations: Vec<f64>,
+        bic: f64,
+    }
+
     #[pyclass]
     struct EmbeddingCluster {
         n_clusters: usize,
@@ -1479,25 +1451,8 @@ mod python_bindings {
         tol: f64,
         random_state: u64,
         n_init: usize,
-        // Fitted state
-        labels: Option<Vec<usize>>,
-        centroids: Option<Vec<f64>>, // flat, unit-norm, in reduced space
-        fitted_d: usize,             // dimensionality of fitted centroids
-        objective: Option<f64>,
-        n_iter: Option<usize>,
-        representatives: Option<Vec<usize>>,
-        intra_similarity: Option<Vec<f64>>,
-        resultant_lengths: Option<Vec<f64>>,
-        // vMF state
-        vmf_probabilities: Option<Vec<f64>>,
-        vmf_concentrations: Option<Vec<f64>>,
-        vmf_bic: Option<f64>,
-        // PCA projection for later use
-        pca_projection: Option<reduction::PcaProjection>,
-        // Cached reduced data (post-PCA, L2-normalized)
-        reduced_data: Option<Vec<f64>>,
-        reduced_n: usize,
-        reduced_d: usize,
+        fitted: Option<EmbeddingClusterFitted>,
+        vmf: Option<VmfState>,
     }
 
     #[pymethods]
@@ -1531,21 +1486,8 @@ mod python_bindings {
                 tol,
                 random_state,
                 n_init,
-                labels: None,
-                centroids: None,
-                fitted_d: 0,
-                objective: None,
-                n_iter: None,
-                representatives: None,
-                intra_similarity: None,
-                resultant_lengths: None,
-                vmf_probabilities: None,
-                vmf_concentrations: None,
-                vmf_bic: None,
-                pca_projection: None,
-                reduced_data: None,
-                reduced_n: 0,
-                reduced_d: 0,
+                fitted: None,
+                vmf: None,
             })
         }
 
@@ -1664,27 +1606,25 @@ mod python_bindings {
 
             let (labels, centroids, work_d, objective, n_iter, reps, intra_sim, res_lens, pca_proj) =
                 result;
-            self.labels = Some(labels);
-            self.centroids = Some(centroids);
-            self.fitted_d = work_d;
-            self.objective = Some(objective);
-            self.n_iter = Some(n_iter);
-            self.representatives = Some(reps);
-            self.intra_similarity = Some(intra_sim);
-            self.resultant_lengths = Some(res_lens);
-            self.pca_projection = pca_proj;
-            if let Some((rd, rn, rdim)) = cached_reduced {
-                self.reduced_data = Some(rd);
-                self.reduced_n = rn;
-                self.reduced_d = rdim;
-            } else {
-                self.reduced_data = None;
-                self.reduced_n = 0;
-                self.reduced_d = 0;
-            }
-            self.vmf_probabilities = None;
-            self.vmf_concentrations = None;
-            self.vmf_bic = None;
+            let (reduced_data, reduced_n, reduced_d) = match cached_reduced {
+                Some((rd, rn, rdim)) => (Some(rd), rn, rdim),
+                None => (None, 0, 0),
+            };
+            self.fitted = Some(EmbeddingClusterFitted {
+                labels,
+                centroids,
+                fitted_d: work_d,
+                objective,
+                n_iter,
+                representatives: reps,
+                intra_similarity: intra_sim,
+                resultant_lengths: res_lens,
+                pca_projection: pca_proj,
+                reduced_data,
+                reduced_n,
+                reduced_d,
+            });
+            self.vmf = None;
             Ok(())
         }
 
@@ -1693,37 +1633,16 @@ mod python_bindings {
             py: Python<'_>,
             x: &Bound<'_, pyo3::types::PyAny>,
         ) -> PyResult<()> {
-            let labels = self.labels.as_ref().ok_or(ClusterError::NotFitted)?;
-            let centroids = self.centroids.as_ref().ok_or(ClusterError::NotFitted)?;
+            let f = self.fitted.as_mut().ok_or(ClusterError::NotFitted)?;
 
             // Need the working data again — extract and process
-            let (data_f64, n, d) = if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
-                let view = arr.as_array();
-                let (n, d) = view.dim();
-                (
-                    view.as_slice()
-                        .expect("contiguous")
-                        .iter()
-                        .map(|&v| v as f64)
-                        .collect::<Vec<_>>(),
-                    n,
-                    d,
-                )
-            } else if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
-                let view = arr.as_array();
-                let (n, d) = view.dim();
-                (view.as_slice().expect("contiguous").to_vec(), n, d)
-            } else {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Expected float32 or float64 array",
-                ));
-            };
+            let (data_f64, n, d) = extract_f64_2d(x)?;
 
             let k = self.n_clusters;
-            let work_d = self.fitted_d;
-            let labels_clone = labels.clone();
-            let centroids_clone = centroids.clone();
-            let pca_proj = self.pca_projection.take();
+            let work_d = f.fitted_d;
+            let labels_clone = f.labels.clone();
+            let centroids_clone = f.centroids.clone();
+            let pca_proj = f.pca_projection.take();
 
             let vmf_result = py.allow_threads(move || {
                 let mut data = data_f64;
@@ -1752,108 +1671,107 @@ mod python_bindings {
             });
 
             let (vmf_state, pca_proj) = vmf_result;
-            self.pca_projection = pca_proj;
-            self.vmf_probabilities = Some(vmf_state.responsibilities);
-            self.vmf_concentrations = Some(vmf_state.concentrations);
-            self.vmf_bic = Some(vmf_state.bic);
+            self.fitted.as_mut().unwrap().pca_projection = pca_proj;
+            self.vmf = Some(VmfState {
+                probabilities: vmf_state.responsibilities,
+                concentrations: vmf_state.concentrations,
+                bic: vmf_state.bic,
+            });
             Ok(())
         }
 
         #[getter]
         fn labels_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
-            let labels = self.labels.as_ref().ok_or(ClusterError::NotFitted)?;
+            let f = self.fitted.as_ref().ok_or(ClusterError::NotFitted)?;
             Ok(PyArray1::from_vec(
                 py,
-                labels.iter().map(|&l| l as i64).collect(),
+                f.labels.iter().map(|&l| l as i64).collect(),
             ))
         }
 
         #[getter]
         fn cluster_centers_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-            let centroids = self.centroids.as_ref().ok_or(ClusterError::NotFitted)?;
-            let arr = ndarray::Array2::from_shape_vec(
-                (self.n_clusters, self.fitted_d),
-                centroids.clone(),
-            )
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            let f = self.fitted.as_ref().ok_or(ClusterError::NotFitted)?;
+            let arr =
+                ndarray::Array2::from_shape_vec((self.n_clusters, f.fitted_d), f.centroids.clone())
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
             Ok(PyArray2::from_owned_array(py, arr))
         }
 
         #[getter]
         fn objective_(&self) -> PyResult<f64> {
-            self.objective.ok_or_else(|| ClusterError::NotFitted.into())
+            Ok(self
+                .fitted
+                .as_ref()
+                .ok_or(ClusterError::NotFitted)?
+                .objective)
         }
 
         #[getter]
         fn n_iter_(&self) -> PyResult<usize> {
-            self.n_iter.ok_or_else(|| ClusterError::NotFitted.into())
+            Ok(self.fitted.as_ref().ok_or(ClusterError::NotFitted)?.n_iter)
         }
 
         #[getter]
         fn representatives_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
-            let reps = self
-                .representatives
-                .as_ref()
-                .ok_or(ClusterError::NotFitted)?;
+            let f = self.fitted.as_ref().ok_or(ClusterError::NotFitted)?;
             Ok(PyArray1::from_vec(
                 py,
-                reps.iter().map(|&r| r as i64).collect(),
+                f.representatives.iter().map(|&r| r as i64).collect(),
             ))
         }
 
         #[getter]
         fn intra_similarity_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
-            let sims = self
-                .intra_similarity
-                .as_ref()
-                .ok_or(ClusterError::NotFitted)?;
-            Ok(PyArray1::from_vec(py, sims.clone()))
+            let f = self.fitted.as_ref().ok_or(ClusterError::NotFitted)?;
+            Ok(PyArray1::from_vec(py, f.intra_similarity.clone()))
         }
 
         #[getter]
         fn resultant_lengths_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
-            let rl = self
-                .resultant_lengths
-                .as_ref()
-                .ok_or(ClusterError::NotFitted)?;
-            Ok(PyArray1::from_vec(py, rl.clone()))
+            let f = self.fitted.as_ref().ok_or(ClusterError::NotFitted)?;
+            Ok(PyArray1::from_vec(py, f.resultant_lengths.clone()))
         }
 
         #[getter]
         fn probabilities_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-            let probs = self.vmf_probabilities.as_ref().ok_or_else(|| {
+            let v = self.vmf.as_ref().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Call refine_vmf() first")
             })?;
-            let n = probs.len() / self.n_clusters;
-            let arr = ndarray::Array2::from_shape_vec((n, self.n_clusters), probs.clone())
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            let n = v.probabilities.len() / self.n_clusters;
+            let arr =
+                ndarray::Array2::from_shape_vec((n, self.n_clusters), v.probabilities.clone())
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
             Ok(PyArray2::from_owned_array(py, arr))
         }
 
         #[getter]
         fn concentrations_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
-            let conc = self.vmf_concentrations.as_ref().ok_or_else(|| {
+            let v = self.vmf.as_ref().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Call refine_vmf() first")
             })?;
-            Ok(PyArray1::from_vec(py, conc.clone()))
+            Ok(PyArray1::from_vec(py, v.concentrations.clone()))
         }
 
         #[getter]
         fn bic_(&self) -> PyResult<f64> {
-            self.vmf_bic.ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Call refine_vmf() first").into()
-            })
+            let v = self.vmf.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Call refine_vmf() first")
+            })?;
+            Ok(v.bic)
         }
 
         #[getter]
         fn reduced_data_<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
-            match self.reduced_data {
+            let f = match self.fitted.as_ref() {
+                Some(f) => f,
+                None => return Ok(py.None()),
+            };
+            match f.reduced_data {
                 Some(ref data) => {
-                    let arr = ndarray::Array2::from_shape_vec(
-                        (self.reduced_n, self.reduced_d),
-                        data.clone(),
-                    )
-                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+                    let arr =
+                        ndarray::Array2::from_shape_vec((f.reduced_n, f.reduced_d), data.clone())
+                            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
                     Ok(PyArray2::from_owned_array(py, arr).into_any().unbind())
                 }
                 None => Ok(py.None()),
@@ -1879,44 +1797,31 @@ mod python_bindings {
             dict.set_item("n_init", self.n_init)?;
 
             // Fitted state
-            let is_fitted = self.labels.is_some();
+            let is_fitted = self.fitted.is_some();
             dict.set_item("fitted", is_fitted)?;
-            if is_fitted {
+            if let Some(ref f) = self.fitted {
                 dict.set_item(
                     "labels",
-                    self.labels
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .map(|&l| l as i64)
-                        .collect::<Vec<_>>(),
+                    f.labels.iter().map(|&l| l as i64).collect::<Vec<_>>(),
                 )?;
-                dict.set_item("centroids", self.centroids.as_ref().unwrap().clone())?;
-                dict.set_item("fitted_d", self.fitted_d)?;
-                dict.set_item("objective", self.objective.unwrap())?;
-                dict.set_item("n_iter", self.n_iter.unwrap())?;
+                dict.set_item("centroids", f.centroids.clone())?;
+                dict.set_item("fitted_d", f.fitted_d)?;
+                dict.set_item("objective", f.objective)?;
+                dict.set_item("n_iter", f.n_iter)?;
                 dict.set_item(
                     "representatives",
-                    self.representatives
-                        .as_ref()
-                        .unwrap()
+                    f.representatives
                         .iter()
                         .map(|&r| r as i64)
                         .collect::<Vec<_>>(),
                 )?;
-                dict.set_item(
-                    "intra_similarity",
-                    self.intra_similarity.as_ref().unwrap().clone(),
-                )?;
-                dict.set_item(
-                    "resultant_lengths",
-                    self.resultant_lengths.as_ref().unwrap().clone(),
-                )?;
+                dict.set_item("intra_similarity", f.intra_similarity.clone())?;
+                dict.set_item("resultant_lengths", f.resultant_lengths.clone())?;
 
                 // PCA projection (optional)
-                let has_pca = self.pca_projection.is_some();
+                let has_pca = f.pca_projection.is_some();
                 dict.set_item("has_pca", has_pca)?;
-                if let Some(ref proj) = self.pca_projection {
+                if let Some(ref proj) = f.pca_projection {
                     dict.set_item("pca_components", proj.components.clone())?;
                     dict.set_item("pca_mean", proj.mean.clone())?;
                     dict.set_item("pca_input_dim", proj.input_dim)?;
@@ -1924,18 +1829,12 @@ mod python_bindings {
                 }
 
                 // vMF state (optional)
-                let vmf_fitted = self.vmf_probabilities.is_some();
+                let vmf_fitted = self.vmf.is_some();
                 dict.set_item("vmf_fitted", vmf_fitted)?;
-                if vmf_fitted {
-                    dict.set_item(
-                        "vmf_probabilities",
-                        self.vmf_probabilities.as_ref().unwrap().clone(),
-                    )?;
-                    dict.set_item(
-                        "vmf_concentrations",
-                        self.vmf_concentrations.as_ref().unwrap().clone(),
-                    )?;
-                    dict.set_item("vmf_bic", self.vmf_bic.unwrap())?;
+                if let Some(ref v) = self.vmf {
+                    dict.set_item("vmf_probabilities", v.probabilities.clone())?;
+                    dict.set_item("vmf_concentrations", v.concentrations.clone())?;
+                    dict.set_item("vmf_bic", v.bic)?;
                 }
             }
             Ok(dict.into())
@@ -1954,63 +1853,57 @@ mod python_bindings {
             let is_fitted: bool = state.get_item("fitted")?.unwrap().extract()?;
             if is_fitted {
                 let labels_i64: Vec<i64> = state.get_item("labels")?.unwrap().extract()?;
-                self.labels = Some(labels_i64.iter().map(|&l| l as usize).collect());
-                self.centroids = Some(state.get_item("centroids")?.unwrap().extract()?);
-                self.fitted_d = state.get_item("fitted_d")?.unwrap().extract()?;
-                self.objective = Some(state.get_item("objective")?.unwrap().extract()?);
-                self.n_iter = Some(state.get_item("n_iter")?.unwrap().extract()?);
+                let labels = labels_i64.iter().map(|&l| l as usize).collect();
+                let centroids = state.get_item("centroids")?.unwrap().extract()?;
+                let fitted_d = state.get_item("fitted_d")?.unwrap().extract()?;
+                let objective = state.get_item("objective")?.unwrap().extract()?;
+                let n_iter = state.get_item("n_iter")?.unwrap().extract()?;
                 let reps_i64: Vec<i64> = state.get_item("representatives")?.unwrap().extract()?;
-                self.representatives = Some(reps_i64.iter().map(|&r| r as usize).collect());
-                self.intra_similarity =
-                    Some(state.get_item("intra_similarity")?.unwrap().extract()?);
-                self.resultant_lengths =
-                    Some(state.get_item("resultant_lengths")?.unwrap().extract()?);
+                let representatives = reps_i64.iter().map(|&r| r as usize).collect();
+                let intra_similarity = state.get_item("intra_similarity")?.unwrap().extract()?;
+                let resultant_lengths = state.get_item("resultant_lengths")?.unwrap().extract()?;
 
-                // PCA projection
                 let has_pca: bool = state.get_item("has_pca")?.unwrap().extract()?;
-                if has_pca {
-                    self.pca_projection = Some(reduction::PcaProjection {
+                let pca_projection = if has_pca {
+                    Some(reduction::PcaProjection {
                         components: state.get_item("pca_components")?.unwrap().extract()?,
                         mean: state.get_item("pca_mean")?.unwrap().extract()?,
                         input_dim: state.get_item("pca_input_dim")?.unwrap().extract()?,
                         output_dim: state.get_item("pca_output_dim")?.unwrap().extract()?,
-                    });
+                    })
                 } else {
-                    self.pca_projection = None;
-                }
+                    None
+                };
 
-                // vMF state
+                self.fitted = Some(EmbeddingClusterFitted {
+                    labels,
+                    centroids,
+                    fitted_d,
+                    objective,
+                    n_iter,
+                    representatives,
+                    intra_similarity,
+                    resultant_lengths,
+                    pca_projection,
+                    reduced_data: None,
+                    reduced_n: 0,
+                    reduced_d: 0,
+                });
+
                 let vmf_fitted: bool = state.get_item("vmf_fitted")?.unwrap().extract()?;
-                if vmf_fitted {
-                    self.vmf_probabilities =
-                        Some(state.get_item("vmf_probabilities")?.unwrap().extract()?);
-                    self.vmf_concentrations =
-                        Some(state.get_item("vmf_concentrations")?.unwrap().extract()?);
-                    self.vmf_bic = Some(state.get_item("vmf_bic")?.unwrap().extract()?);
+                self.vmf = if vmf_fitted {
+                    Some(VmfState {
+                        probabilities: state.get_item("vmf_probabilities")?.unwrap().extract()?,
+                        concentrations: state.get_item("vmf_concentrations")?.unwrap().extract()?,
+                        bic: state.get_item("vmf_bic")?.unwrap().extract()?,
+                    })
                 } else {
-                    self.vmf_probabilities = None;
-                    self.vmf_concentrations = None;
-                    self.vmf_bic = None;
-                }
+                    None
+                };
             } else {
-                self.labels = None;
-                self.centroids = None;
-                self.fitted_d = 0;
-                self.objective = None;
-                self.n_iter = None;
-                self.representatives = None;
-                self.intra_similarity = None;
-                self.resultant_lengths = None;
-                self.pca_projection = None;
-                self.vmf_probabilities = None;
-                self.vmf_concentrations = None;
-                self.vmf_bic = None;
+                self.fitted = None;
+                self.vmf = None;
             }
-
-            // reduced_data is ephemeral — not serialized
-            self.reduced_data = None;
-            self.reduced_n = 0;
-            self.reduced_d = 0;
 
             Ok(())
         }
