@@ -78,8 +78,11 @@ pub fn run_hamerly_iterations<F: Scalar, D: Distance<F>>(
         n_iter = 1;
 
         if max_shift * max_shift < tol {
+            let centroids_flat =
+                std::sync::Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
             return Ok(KMeansState {
                 centroids: centroids.clone(),
+                centroids_flat,
                 labels,
                 inertia,
                 n_iter,
@@ -163,8 +166,10 @@ pub fn run_hamerly_iterations<F: Scalar, D: Distance<F>>(
         })
         .sum();
 
+    let centroids_flat = std::sync::Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
     Ok(KMeansState {
         centroids: centroids.clone(),
+        centroids_flat,
         labels,
         inertia,
         n_iter,

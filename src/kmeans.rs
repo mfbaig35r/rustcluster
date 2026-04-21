@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ndarray::{Array2, ArrayView2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -14,6 +16,8 @@ use crate::utils::{assign_nearest_with, validate_data_generic};
 /// Result of a fitted K-means model, generic over float type.
 pub struct KMeansState<F: Scalar> {
     pub centroids: Array2<F>,
+    /// Flat copy of centroids for cheap sharing into predict closures.
+    pub centroids_flat: Arc<Vec<F>>,
     pub labels: Vec<usize>,
     pub inertia: f64, // always f64 for consistency at the Python boundary
     pub n_iter: usize,
@@ -27,8 +31,10 @@ pub enum Algorithm {
     Hamerly,
 }
 
-impl Algorithm {
-    pub fn from_str(s: &str) -> Result<Self, ClusterError> {
+impl std::str::FromStr for Algorithm {
+    type Err = ClusterError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "auto" => Ok(Algorithm::Auto),
             "lloyd" => Ok(Algorithm::Lloyd),
@@ -36,7 +42,9 @@ impl Algorithm {
             _ => Err(ClusterError::InvalidAlgorithm(s.to_string())),
         }
     }
+}
 
+impl Algorithm {
     pub fn resolve(self, d: usize, k: usize) -> Algorithm {
         match self {
             Algorithm::Auto => {
@@ -295,8 +303,10 @@ fn run_lloyd_iterations<F: Scalar, D: Distance<F>>(
         }
     }
 
+    let centroids_flat = Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
     Ok(KMeansState {
         centroids: centroids.clone(),
+        centroids_flat,
         labels,
         inertia,
         n_iter,

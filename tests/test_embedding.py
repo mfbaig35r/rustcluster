@@ -94,26 +94,26 @@ class TestVMF:
     def test_refine_vmf(self):
         X, _ = make_spherical_data()
         model = EmbeddingCluster(n_clusters=3, reduction_dim=None).fit(X)
-        model.refine_vmf()
+        model.refine_vmf(X)
         assert model.probabilities_.shape == (300, 3)
 
     def test_probabilities_sum_to_one(self):
         X, _ = make_spherical_data()
         model = EmbeddingCluster(n_clusters=3, reduction_dim=None).fit(X)
-        model.refine_vmf()
+        model.refine_vmf(X)
         row_sums = model.probabilities_.sum(axis=1)
         np.testing.assert_allclose(row_sums, 1.0, atol=1e-5)
 
     def test_concentrations_positive(self):
         X, _ = make_spherical_data()
         model = EmbeddingCluster(n_clusters=3, reduction_dim=None).fit(X)
-        model.refine_vmf()
+        model.refine_vmf(X)
         assert all(k > 0 for k in model.concentrations_)
 
     def test_bic_finite(self):
         X, _ = make_spherical_data()
         model = EmbeddingCluster(n_clusters=3, reduction_dim=None).fit(X)
-        model.refine_vmf()
+        model.refine_vmf(X)
         assert np.isfinite(model.bic_)
 
 
@@ -140,8 +140,9 @@ class TestNotFitted:
             EmbeddingCluster().labels_
 
     def test_vmf_before_fit(self):
+        X = np.random.randn(10, 5).astype(np.float32)
         with pytest.raises(RuntimeError):
-            EmbeddingCluster().refine_vmf()
+            EmbeddingCluster().refine_vmf(X)
 
 
 class TestRepr:

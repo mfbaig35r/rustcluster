@@ -25,7 +25,10 @@ pub mod _bench_api {
 
 #[cfg(feature = "python")]
 mod python_bindings {
-    use numpy::{PyArray1, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
+    use std::str::FromStr;
+    use std::sync::Arc;
+
+    use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
     use pyo3::prelude::*;
     use rayon::prelude::*;
 
@@ -153,13 +156,13 @@ mod python_bindings {
                     let (_, expected_d) = state.centroids.dim();
                     validate_predict_data(&view, expected_d)?;
 
-                    let centroids = state.centroids.clone();
+                    let centroids = Arc::clone(&state.centroids_flat);
                     let k = self.n_clusters;
 
                     let labels = py.allow_threads(move || {
                         let (n, d) = view.dim();
                         let data_slice = view.as_slice().expect("C-contiguous");
-                        let centroids_slice = centroids.as_slice().expect("C-contiguous");
+                        let centroids_slice = &centroids[..];
                         (0..n)
                             .into_par_iter()
                             .map(|i| {
@@ -203,13 +206,13 @@ mod python_bindings {
                     let (_, expected_d) = state.centroids.dim();
                     validate_predict_data_generic(&view, expected_d)?;
 
-                    let centroids = state.centroids.clone();
+                    let centroids = Arc::clone(&state.centroids_flat);
                     let k = self.n_clusters;
 
                     let labels = py.allow_threads(move || {
                         let (n, d) = view.dim();
                         let data_slice = view.as_slice().expect("C-contiguous");
-                        let centroids_slice = centroids.as_slice().expect("C-contiguous");
+                        let centroids_slice = &centroids[..];
                         (0..n)
                             .into_par_iter()
                             .map(|i| {
@@ -384,8 +387,12 @@ mod python_bindings {
                         .get_item("centroids")?
                         .unwrap()
                         .extract::<PyReadonlyArray2<'_, f32>>()?;
+                    let centroids = arr.as_array().to_owned();
+                    let centroids_flat =
+                        Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
                     self.fitted = Some(FittedState::F32(KMeansState {
-                        centroids: arr.as_array().to_owned(),
+                        centroids,
+                        centroids_flat,
                         labels,
                         inertia,
                         n_iter,
@@ -395,8 +402,12 @@ mod python_bindings {
                         .get_item("centroids")?
                         .unwrap()
                         .extract::<PyReadonlyArray2<'_, f64>>()?;
+                    let centroids = arr.as_array().to_owned();
+                    let centroids_flat =
+                        Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
                     self.fitted = Some(FittedState::F64(KMeansState {
-                        centroids: arr.as_array().to_owned(),
+                        centroids,
+                        centroids_flat,
                         labels,
                         inertia,
                         n_iter,
@@ -1195,12 +1206,12 @@ mod python_bindings {
                     let view = arr.as_array();
                     let (_, expected_d) = state.centroids.dim();
                     validate_predict_data(&view, expected_d)?;
-                    let centroids = state.centroids.clone();
+                    let centroids = Arc::clone(&state.centroids_flat);
                     let k = self.n_clusters;
                     let labels = py.allow_threads(move || {
                         let (n, d) = view.dim();
                         let ds = view.as_slice().expect("C-contiguous");
-                        let cs = centroids.as_slice().expect("C-contiguous");
+                        let cs = &centroids[..];
                         (0..n)
                                 .into_par_iter()
                                 .map(|i| {
@@ -1241,12 +1252,12 @@ mod python_bindings {
                     let view = arr.as_array();
                     let (_, expected_d) = state.centroids.dim();
                     validate_predict_data_generic(&view, expected_d)?;
-                    let centroids = state.centroids.clone();
+                    let centroids = Arc::clone(&state.centroids_flat);
                     let k = self.n_clusters;
                     let labels = py.allow_threads(move || {
                         let (n, d) = view.dim();
                         let ds = view.as_slice().expect("C-contiguous");
-                        let cs = centroids.as_slice().expect("C-contiguous");
+                        let cs = &centroids[..];
                         (0..n)
                                 .into_par_iter()
                                 .map(|i| {
@@ -1420,8 +1431,12 @@ mod python_bindings {
                         .get_item("centroids")?
                         .unwrap()
                         .extract::<PyReadonlyArray2<'_, f32>>()?;
+                    let centroids = arr.as_array().to_owned();
+                    let centroids_flat =
+                        Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
                     self.fitted = Some(MiniBatchFittedState::F32(MiniBatchKMeansState {
-                        centroids: arr.as_array().to_owned(),
+                        centroids,
+                        centroids_flat,
                         labels,
                         inertia,
                         n_iter,
@@ -1431,8 +1446,12 @@ mod python_bindings {
                         .get_item("centroids")?
                         .unwrap()
                         .extract::<PyReadonlyArray2<'_, f64>>()?;
+                    let centroids = arr.as_array().to_owned();
+                    let centroids_flat =
+                        Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
                     self.fitted = Some(MiniBatchFittedState::F64(MiniBatchKMeansState {
-                        centroids: arr.as_array().to_owned(),
+                        centroids,
+                        centroids_flat,
                         labels,
                         inertia,
                         n_iter,
@@ -1847,6 +1866,158 @@ mod python_bindings {
                 self.n_clusters, self.reduction_dim, self.max_iter, self.n_init
             )
         }
+
+        fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+            let dict = pyo3::types::PyDict::new(py);
+            // Config
+            dict.set_item("n_clusters", self.n_clusters)?;
+            dict.set_item("reduction_dim", self.reduction_dim)?;
+            dict.set_item("reduction", &self.reduction)?;
+            dict.set_item("max_iter", self.max_iter)?;
+            dict.set_item("tol", self.tol)?;
+            dict.set_item("random_state", self.random_state)?;
+            dict.set_item("n_init", self.n_init)?;
+
+            // Fitted state
+            let is_fitted = self.labels.is_some();
+            dict.set_item("fitted", is_fitted)?;
+            if is_fitted {
+                dict.set_item(
+                    "labels",
+                    self.labels
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|&l| l as i64)
+                        .collect::<Vec<_>>(),
+                )?;
+                dict.set_item("centroids", self.centroids.as_ref().unwrap().clone())?;
+                dict.set_item("fitted_d", self.fitted_d)?;
+                dict.set_item("objective", self.objective.unwrap())?;
+                dict.set_item("n_iter", self.n_iter.unwrap())?;
+                dict.set_item(
+                    "representatives",
+                    self.representatives
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|&r| r as i64)
+                        .collect::<Vec<_>>(),
+                )?;
+                dict.set_item(
+                    "intra_similarity",
+                    self.intra_similarity.as_ref().unwrap().clone(),
+                )?;
+                dict.set_item(
+                    "resultant_lengths",
+                    self.resultant_lengths.as_ref().unwrap().clone(),
+                )?;
+
+                // PCA projection (optional)
+                let has_pca = self.pca_projection.is_some();
+                dict.set_item("has_pca", has_pca)?;
+                if let Some(ref proj) = self.pca_projection {
+                    dict.set_item("pca_components", proj.components.clone())?;
+                    dict.set_item("pca_mean", proj.mean.clone())?;
+                    dict.set_item("pca_input_dim", proj.input_dim)?;
+                    dict.set_item("pca_output_dim", proj.output_dim)?;
+                }
+
+                // vMF state (optional)
+                let vmf_fitted = self.vmf_probabilities.is_some();
+                dict.set_item("vmf_fitted", vmf_fitted)?;
+                if vmf_fitted {
+                    dict.set_item(
+                        "vmf_probabilities",
+                        self.vmf_probabilities.as_ref().unwrap().clone(),
+                    )?;
+                    dict.set_item(
+                        "vmf_concentrations",
+                        self.vmf_concentrations.as_ref().unwrap().clone(),
+                    )?;
+                    dict.set_item("vmf_bic", self.vmf_bic.unwrap())?;
+                }
+            }
+            Ok(dict.into())
+        }
+
+        fn __setstate__(&mut self, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+            // Config
+            self.n_clusters = state.get_item("n_clusters")?.unwrap().extract()?;
+            self.reduction_dim = state.get_item("reduction_dim")?.unwrap().extract()?;
+            self.reduction = state.get_item("reduction")?.unwrap().extract()?;
+            self.max_iter = state.get_item("max_iter")?.unwrap().extract()?;
+            self.tol = state.get_item("tol")?.unwrap().extract()?;
+            self.random_state = state.get_item("random_state")?.unwrap().extract()?;
+            self.n_init = state.get_item("n_init")?.unwrap().extract()?;
+
+            let is_fitted: bool = state.get_item("fitted")?.unwrap().extract()?;
+            if is_fitted {
+                let labels_i64: Vec<i64> = state.get_item("labels")?.unwrap().extract()?;
+                self.labels = Some(labels_i64.iter().map(|&l| l as usize).collect());
+                self.centroids = Some(state.get_item("centroids")?.unwrap().extract()?);
+                self.fitted_d = state.get_item("fitted_d")?.unwrap().extract()?;
+                self.objective = Some(state.get_item("objective")?.unwrap().extract()?);
+                self.n_iter = Some(state.get_item("n_iter")?.unwrap().extract()?);
+                let reps_i64: Vec<i64> = state.get_item("representatives")?.unwrap().extract()?;
+                self.representatives = Some(reps_i64.iter().map(|&r| r as usize).collect());
+                self.intra_similarity =
+                    Some(state.get_item("intra_similarity")?.unwrap().extract()?);
+                self.resultant_lengths =
+                    Some(state.get_item("resultant_lengths")?.unwrap().extract()?);
+
+                // PCA projection
+                let has_pca: bool = state.get_item("has_pca")?.unwrap().extract()?;
+                if has_pca {
+                    self.pca_projection = Some(reduction::PcaProjection {
+                        components: state.get_item("pca_components")?.unwrap().extract()?,
+                        mean: state.get_item("pca_mean")?.unwrap().extract()?,
+                        input_dim: state.get_item("pca_input_dim")?.unwrap().extract()?,
+                        output_dim: state.get_item("pca_output_dim")?.unwrap().extract()?,
+                    });
+                } else {
+                    self.pca_projection = None;
+                }
+
+                // vMF state
+                let vmf_fitted: bool = state.get_item("vmf_fitted")?.unwrap().extract()?;
+                if vmf_fitted {
+                    self.vmf_probabilities =
+                        Some(state.get_item("vmf_probabilities")?.unwrap().extract()?);
+                    self.vmf_concentrations =
+                        Some(state.get_item("vmf_concentrations")?.unwrap().extract()?);
+                    self.vmf_bic = Some(state.get_item("vmf_bic")?.unwrap().extract()?);
+                } else {
+                    self.vmf_probabilities = None;
+                    self.vmf_concentrations = None;
+                    self.vmf_bic = None;
+                }
+            } else {
+                self.labels = None;
+                self.centroids = None;
+                self.fitted_d = 0;
+                self.objective = None;
+                self.n_iter = None;
+                self.representatives = None;
+                self.intra_similarity = None;
+                self.resultant_lengths = None;
+                self.pca_projection = None;
+                self.vmf_probabilities = None;
+                self.vmf_concentrations = None;
+                self.vmf_bic = None;
+            }
+
+            // reduced_data is ephemeral — not serialized
+            self.reduced_data = None;
+            self.reduced_n = 0;
+            self.reduced_d = 0;
+
+            Ok(())
+        }
+
+        fn __getnewargs__(&self) -> (usize,) {
+            (self.n_clusters,)
+        }
     }
 
     // ---- EmbeddingReducer ----
@@ -1960,6 +2131,16 @@ mod python_bindings {
             })
         }
 
+        #[getter]
+        fn target_dim(&self) -> usize {
+            self.target_dim
+        }
+
+        #[getter]
+        fn method(&self) -> &str {
+            &self.method
+        }
+
         fn __repr__(&self) -> String {
             let fitted = if self.state.is_some() {
                 "fitted"
@@ -2003,18 +2184,21 @@ mod python_bindings {
     fn silhouette_score(
         py: Python<'_>,
         x: &Bound<'_, pyo3::types::PyAny>,
-        labels: Vec<i64>,
+        labels: PyReadonlyArray1<'_, i64>,
     ) -> PyResult<f64> {
+        let labels_slice = labels
+            .as_slice()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("labels must be C-contiguous"))?;
         if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
             let view = arr.as_array();
             return py
-                .allow_threads(move || crate::metrics::silhouette_score(&view, &labels))
+                .allow_threads(move || crate::metrics::silhouette_score(&view, labels_slice))
                 .map_err(|e| pyo3::PyErr::from(e));
         }
         if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
             let view = arr.as_array();
             return py
-                .allow_threads(move || crate::metrics::silhouette_score(&view, &labels))
+                .allow_threads(move || crate::metrics::silhouette_score(&view, labels_slice))
                 .map_err(|e| pyo3::PyErr::from(e));
         }
         Err(pyo3::exceptions::PyValueError::new_err(
@@ -2026,18 +2210,21 @@ mod python_bindings {
     fn calinski_harabasz_score(
         py: Python<'_>,
         x: &Bound<'_, pyo3::types::PyAny>,
-        labels: Vec<i64>,
+        labels: PyReadonlyArray1<'_, i64>,
     ) -> PyResult<f64> {
+        let labels_slice = labels
+            .as_slice()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("labels must be C-contiguous"))?;
         if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
             let view = arr.as_array();
             return py
-                .allow_threads(move || crate::metrics::calinski_harabasz_score(&view, &labels))
+                .allow_threads(move || crate::metrics::calinski_harabasz_score(&view, labels_slice))
                 .map_err(|e| pyo3::PyErr::from(e));
         }
         if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
             let view = arr.as_array();
             return py
-                .allow_threads(move || crate::metrics::calinski_harabasz_score(&view, &labels))
+                .allow_threads(move || crate::metrics::calinski_harabasz_score(&view, labels_slice))
                 .map_err(|e| pyo3::PyErr::from(e));
         }
         Err(pyo3::exceptions::PyValueError::new_err(
@@ -2049,18 +2236,21 @@ mod python_bindings {
     fn davies_bouldin_score(
         py: Python<'_>,
         x: &Bound<'_, pyo3::types::PyAny>,
-        labels: Vec<i64>,
+        labels: PyReadonlyArray1<'_, i64>,
     ) -> PyResult<f64> {
+        let labels_slice = labels
+            .as_slice()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("labels must be C-contiguous"))?;
         if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f64>>() {
             let view = arr.as_array();
             return py
-                .allow_threads(move || crate::metrics::davies_bouldin_score(&view, &labels))
+                .allow_threads(move || crate::metrics::davies_bouldin_score(&view, labels_slice))
                 .map_err(|e| pyo3::PyErr::from(e));
         }
         if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
             let view = arr.as_array();
             return py
-                .allow_threads(move || crate::metrics::davies_bouldin_score(&view, &labels))
+                .allow_threads(move || crate::metrics::davies_bouldin_score(&view, labels_slice))
                 .map_err(|e| pyo3::PyErr::from(e));
         }
         Err(pyo3::exceptions::PyValueError::new_err(

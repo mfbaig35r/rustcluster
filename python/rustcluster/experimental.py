@@ -7,17 +7,9 @@ import numpy as np
 
 from rustcluster._rustcluster import EmbeddingCluster as _RustEmbeddingCluster
 from rustcluster._rustcluster import EmbeddingReducer as _RustEmbeddingReducer
+from rustcluster import _prepare_array as _prepare
 
 __all__ = ["EmbeddingCluster", "EmbeddingReducer"]
-
-
-def _prepare(X):
-    X = np.asarray(X)
-    if X.ndim != 2:
-        raise ValueError(f"Expected 2D array, got {X.ndim}D")
-    if X.dtype == np.float32:
-        return np.ascontiguousarray(X, dtype=np.float32)
-    return np.ascontiguousarray(X, dtype=np.float64)
 
 
 class EmbeddingCluster:
@@ -62,7 +54,6 @@ class EmbeddingCluster:
         self._random_state = random_state
         self._n_init = n_init
         self._reduction = reduction
-        self._X = None  # cached for refine_vmf
 
     def fit(self, X):
         """Fit the embedding clustering pipeline.
@@ -77,23 +68,26 @@ class EmbeddingCluster:
         self
         """
         X = _prepare(X)
-        self._X = X
         self._model.fit(X)
         return self
 
-    def refine_vmf(self):
+    def refine_vmf(self, X):
         """Refine clusters with von Mises-Fisher mixture model.
 
         Produces soft cluster probabilities, per-cluster concentration
         parameters, and BIC for model selection. Requires fit() first.
 
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Same data passed to fit() (will be L2-normalized internally).
+
         Returns
         -------
         self
         """
-        if self._X is None:
-            raise RuntimeError("Call fit() before refine_vmf()")
-        self._model.refine_vmf(self._X)
+        X = _prepare(X)
+        self._model.refine_vmf(X)
         return self
 
     @property
@@ -160,6 +154,18 @@ class EmbeddingCluster:
             f"reduction_dim={self._reduction_dim}, max_iter={self._max_iter}, "
             f"n_init={self._n_init})"
         )
+
+    def __getstate__(self):
+        return {"model_state": self._model.__getstate__(), "params": {
+            "n_clusters": self._n_clusters, "reduction_dim": self._reduction_dim,
+            "max_iter": self._max_iter, "tol": self._tol,
+            "random_state": self._random_state, "n_init": self._n_init,
+            "reduction": self._reduction,
+        }}
+
+    def __setstate__(self, state):
+        self.__init__(**state["params"])
+        self._model.__setstate__(state["model_state"])
 
 
 class EmbeddingReducer:
@@ -264,8 +270,8 @@ class EmbeddingReducer:
         rust_model = _RustEmbeddingReducer.load(str(path))
         obj = cls.__new__(cls)
         obj._model = rust_model
-        obj._target_dim = rust_model.target_dim if hasattr(rust_model, 'target_dim') else None
-        obj._method = None
+        obj._target_dim = rust_model.target_dim
+        obj._method = rust_model.method
         return obj
 
     def __repr__(self):

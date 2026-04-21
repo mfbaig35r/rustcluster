@@ -115,8 +115,10 @@ pub enum Metric {
     Manhattan,
 }
 
-impl Metric {
-    pub fn from_str(s: &str) -> Result<Self, crate::error::ClusterError> {
+impl std::str::FromStr for Metric {
+    type Err = crate::error::ClusterError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "euclidean" | "l2" => Ok(Metric::Euclidean),
             "cosine" => Ok(Metric::Cosine),
@@ -195,11 +197,11 @@ mod tests {
 
     #[test]
     fn test_metric_from_str() {
-        assert_eq!(Metric::from_str("euclidean").unwrap(), Metric::Euclidean);
-        assert_eq!(Metric::from_str("cosine").unwrap(), Metric::Cosine);
-        assert_eq!(Metric::from_str("manhattan").unwrap(), Metric::Manhattan);
-        assert_eq!(Metric::from_str("cityblock").unwrap(), Metric::Manhattan);
-        assert_eq!(Metric::from_str("l1").unwrap(), Metric::Manhattan);
-        assert!(Metric::from_str("hamming").is_err());
+        assert_eq!("euclidean".parse::<Metric>().unwrap(), Metric::Euclidean);
+        assert_eq!("cosine".parse::<Metric>().unwrap(), Metric::Cosine);
+        assert_eq!("manhattan".parse::<Metric>().unwrap(), Metric::Manhattan);
+        assert_eq!("cityblock".parse::<Metric>().unwrap(), Metric::Manhattan);
+        assert_eq!("l1".parse::<Metric>().unwrap(), Metric::Manhattan);
+        assert!("hamming".parse::<Metric>().is_err());
     }
 }

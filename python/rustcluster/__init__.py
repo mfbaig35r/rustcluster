@@ -569,7 +569,7 @@ def silhouette_score(X, labels):
     score : float in [-1, 1]. Higher is better.
     """
     X = _prepare_array(X)
-    labels = np.asarray(labels, dtype=np.int64).tolist()
+    labels = np.ascontiguousarray(labels, dtype=np.int64)
     return _silhouette_score(X, labels)
 
 
@@ -586,7 +586,7 @@ def calinski_harabasz_score(X, labels):
     score : float. Higher is better.
     """
     X = _prepare_array(X)
-    labels = np.asarray(labels, dtype=np.int64).tolist()
+    labels = np.ascontiguousarray(labels, dtype=np.int64)
     return _calinski_harabasz_score(X, labels)
 
 
@@ -603,5 +603,5 @@ def davies_bouldin_score(X, labels):
     score : float. Lower is better.
     """
     X = _prepare_array(X)
-    labels = np.asarray(labels, dtype=np.int64).tolist()
+    labels = np.ascontiguousarray(labels, dtype=np.int64)
     return _davies_bouldin_score(X, labels)

@@ -33,8 +33,10 @@ pub enum Linkage {
     Single,
 }
 
-impl Linkage {
-    pub fn from_str(s: &str) -> Result<Self, ClusterError> {
+impl std::str::FromStr for Linkage {
+    type Err = ClusterError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "ward" => Ok(Linkage::Ward),
             "complete" => Ok(Linkage::Complete),

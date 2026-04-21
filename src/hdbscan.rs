@@ -41,8 +41,10 @@ pub enum ClusterSelectionMethod {
     Leaf,
 }
 
-impl ClusterSelectionMethod {
-    pub fn from_str(s: &str) -> Result<Self, ClusterError> {
+impl std::str::FromStr for ClusterSelectionMethod {
+    type Err = ClusterError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "eom" => Ok(ClusterSelectionMethod::Eom),
             "leaf" => Ok(ClusterSelectionMethod::Leaf),
@@ -281,12 +283,15 @@ fn compute_core_distances<F: Scalar, D: Distance<F>>(
                     }
                 })
                 .collect();
-            dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            // k-th nearest neighbor (index k-1 since index 0 is self with distance 0)
+            // k-th nearest neighbor (index k since index 0 is self with distance 0)
             if k < dists.len() {
+                dists.select_nth_unstable_by(k, |a, b| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
                 dists[k]
             } else {
-                *dists.last().unwrap_or(&0.0)
+                // k >= n, find the max distance
+                dists.iter().copied().fold(0.0f64, f64::max)
             }
         })
         .collect()
@@ -506,7 +511,6 @@ fn condense_and_extract(
                 right,
                 n,
                 &children,
-                &node_size,
                 current_cluster,
                 lambda,
                 &mut point_cluster,
@@ -518,7 +522,6 @@ fn condense_and_extract(
                 left,
                 n,
                 &children,
-                &node_size,
                 current_cluster,
                 lambda,
                 &mut point_cluster,
@@ -531,7 +534,6 @@ fn condense_and_extract(
                 left,
                 n,
                 &children,
-                &node_size,
                 current_cluster,
                 lambda,
                 &mut point_cluster,
@@ -541,7 +543,6 @@ fn condense_and_extract(
                 right,
                 n,
                 &children,
-                &node_size,
                 current_cluster,
                 lambda,
                 &mut point_cluster,
@@ -611,7 +612,6 @@ fn assign_subtree_points(
     node: usize,
     n: usize,
     children: &[(usize, usize)],
-    _node_size: &[usize],
     cluster: usize,
     lambda: f64,
     point_cluster: &mut [usize],

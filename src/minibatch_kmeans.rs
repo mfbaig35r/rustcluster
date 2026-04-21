@@ -6,6 +6,8 @@
 //!
 //! Reference: Sculley, "Web-Scale K-Means Clustering" (WWW 2010).
 
+use std::sync::Arc;
+
 use ndarray::{Array2, ArrayView2};
 use rand::rngs::StdRng;
 use rand::seq::index::sample;
@@ -22,6 +24,8 @@ use crate::utils::{assign_nearest_with, validate_data_generic};
 /// Result of a fitted Mini-batch K-means model.
 pub struct MiniBatchKMeansState<F: Scalar> {
     pub centroids: Array2<F>,
+    /// Flat copy of centroids for cheap sharing into predict closures.
+    pub centroids_flat: Arc<Vec<F>>,
     pub labels: Vec<usize>,
     pub inertia: f64,
     pub n_iter: usize,
@@ -237,8 +241,10 @@ fn run_minibatch_generic<F: Scalar, D: Distance<F>>(
         inertia += dist.to_f64_lossy();
     }
 
+    let centroids_flat = Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
     Ok(MiniBatchKMeansState {
         centroids,
+        centroids_flat,
         labels,
         inertia,
         n_iter,

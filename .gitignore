@@ -29,3 +29,4 @@ Thumbs.db
 *.dylib
 *.dll
 *.whl
+notebooks/supplier_clustering_rustcluster.py
