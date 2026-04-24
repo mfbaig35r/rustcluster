@@ -8,8 +8,9 @@ import numpy as np
 from rustcluster._rustcluster import EmbeddingCluster as _RustEmbeddingCluster
 from rustcluster._rustcluster import EmbeddingReducer as _RustEmbeddingReducer
 from rustcluster import _prepare_array as _prepare
+from rustcluster.hierarchical import HierarchicalSnapshot
 
-__all__ = ["EmbeddingCluster", "EmbeddingReducer"]
+__all__ = ["EmbeddingCluster", "EmbeddingReducer", "HierarchicalSnapshot"]
 
 
 class EmbeddingCluster:

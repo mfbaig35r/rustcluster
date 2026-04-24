@@ -1819,6 +1819,7 @@ mod python_bindings {
                     f.pca_projection.as_ref(),
                     &f.labels,
                     &f.intra_similarity,
+                    &f.resultant_lengths,
                 ),
             })
         }
@@ -2105,10 +2106,12 @@ mod python_bindings {
     #[pymethods]
     impl PyClusterSnapshot {
         /// Assign new points to nearest cluster.
+        #[pyo3(signature = (x, boundary_mode="voronoi"))]
         fn assign<'py>(
             &self,
             py: Python<'py>,
             x: &Bound<'_, pyo3::types::PyAny>,
+            boundary_mode: &str,
         ) -> PyResult<Bound<'py, PyArray1<i64>>> {
             let (data, n, d) = extract_f64_2d(x)?;
             if d != self.inner.input_dim {
@@ -2119,18 +2122,48 @@ mod python_bindings {
                 .into());
             }
             let inner = &self.inner;
-            let result = py.allow_threads(move || inner.assign_batch(&data, n))?;
+            let result = match boundary_mode {
+                "voronoi" => py.allow_threads(move || inner.assign_batch(&data, n))?,
+                "mahalanobis" => {
+                    py.allow_threads(move || inner.assign_batch_mahalanobis(&data, n))?
+                }
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "boundary_mode must be 'voronoi' or 'mahalanobis', got '{boundary_mode}'"
+                    )))
+                }
+            };
             Ok(PyArray1::from_vec(py, result.labels))
         }
 
+        /// Calibrate per-cluster confidence thresholds from representative data.
+        fn calibrate(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
+            let (data, n, d) = extract_f64_2d(x)?;
+            if d != self.inner.input_dim {
+                return Err(ClusterError::DimensionMismatch {
+                    expected: self.inner.input_dim,
+                    got: d,
+                }
+                .into());
+            }
+            // calibrate mutates self.inner, so we can't use allow_threads
+            // (would need &mut across thread boundary). This is fine —
+            // calibrate is a one-time setup call, not a hot path.
+            self.inner.calibrate(&data, n)?;
+            Ok(())
+        }
+
         /// Assign with confidence scores and optional rejection.
-        #[pyo3(signature = (x, distance_threshold=None, confidence_threshold=None))]
+        #[pyo3(signature = (x, distance_threshold=None, confidence_threshold=None, adaptive_threshold=false, adaptive_percentile="p10", boundary_mode="voronoi"))]
         fn assign_with_scores(
             &self,
             py: Python<'_>,
             x: &Bound<'_, pyo3::types::PyAny>,
             distance_threshold: Option<f64>,
             confidence_threshold: Option<f64>,
+            adaptive_threshold: bool,
+            adaptive_percentile: &str,
+            boundary_mode: &str,
         ) -> PyResult<PyAssignmentResult> {
             let (data, n, d) = extract_f64_2d(x)?;
             if d != self.inner.input_dim {
@@ -2142,8 +2175,26 @@ mod python_bindings {
             }
             let inner = &self.inner;
             let spherical = self.inner.spherical;
-            let mut result = py.allow_threads(move || inner.assign_batch(&data, n))?;
+            let mut result = match boundary_mode {
+                "voronoi" => py.allow_threads(move || inner.assign_batch(&data, n))?,
+                "mahalanobis" => {
+                    py.allow_threads(move || inner.assign_batch_mahalanobis(&data, n))?
+                }
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "boundary_mode must be 'voronoi' or 'mahalanobis', got '{boundary_mode}'"
+                    )))
+                }
+            };
             result.apply_rejection(distance_threshold, confidence_threshold, spherical);
+            if adaptive_threshold {
+                let stats = self.inner.confidence_stats.as_ref().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "calibrate() must be called before adaptive_threshold=True",
+                    )
+                })?;
+                result.apply_adaptive_rejection(stats, adaptive_percentile)?;
+            }
             Ok(PyAssignmentResult { inner: result })
         }
 
@@ -2213,6 +2264,11 @@ mod python_bindings {
             self.inner.spherical
         }
 
+        #[getter]
+        fn is_calibrated(&self) -> bool {
+            self.inner.confidence_stats.is_some()
+        }
+
         fn __repr__(&self) -> String {
             format!(
                 "ClusterSnapshot(algorithm=\"{}\", k={}, d={}, input_dim={})",
@@ -2266,6 +2322,22 @@ mod python_bindings {
         #[getter]
         fn n_samples_(&self) -> usize {
             self.inner.n_samples
+        }
+
+        #[getter]
+        fn kappa_drift_<'py>(&self, py: Python<'py>) -> PyObject {
+            match &self.inner.kappa_drift {
+                Some(v) => PyArray1::from_vec(py, v.clone()).into_any().unbind(),
+                None => py.None(),
+            }
+        }
+
+        #[getter]
+        fn direction_drift_<'py>(&self, py: Python<'py>) -> PyObject {
+            match &self.inner.direction_drift {
+                Some(v) => PyArray1::from_vec(py, v.clone()).into_any().unbind(),
+                None => py.None(),
+            }
         }
 
         fn __repr__(&self) -> String {

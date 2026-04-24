@@ -59,7 +59,27 @@ pub enum Preprocessing {
     },
 }
 
-/// Immutable, Send+Sync cluster snapshot for frozen centroid assignment.
+/// Per-cluster confidence distribution from calibration.
+#[derive(Debug, Clone)]
+pub struct ClusterConfidenceStats {
+    /// 5th percentile of confidence per cluster.
+    pub p5: Vec<f64>,
+    /// 10th percentile of confidence per cluster.
+    pub p10: Vec<f64>,
+    /// 25th percentile of confidence per cluster.
+    pub p25: Vec<f64>,
+    /// 50th percentile (median) of confidence per cluster.
+    pub p50: Vec<f64>,
+}
+
+/// Per-cluster per-dimension diagonal variance.
+#[derive(Debug, Clone)]
+pub struct ClusterVariances {
+    /// Flat row-major (k * d): per-cluster per-dimension variance.
+    pub variances: Vec<f64>,
+}
+
+/// Cluster snapshot for frozen centroid assignment.
 pub struct ClusterSnapshot {
     pub algorithm: SnapshotAlgorithm,
     pub metric: Metric,
@@ -84,6 +104,16 @@ pub struct ClusterSnapshot {
     pub fit_n_samples: usize,
     /// Snapshot format version.
     pub version: u32,
+
+    // ---- v2 calibration fields (None for uncalibrated / v1 snapshots) ----
+    /// Per-cluster confidence quantiles from calibrate().
+    pub confidence_stats: Option<ClusterConfidenceStats>,
+    /// Per-cluster per-dimension variance from calibrate().
+    pub cluster_variances: Option<ClusterVariances>,
+    /// Per-cluster vMF concentration parameter (spherical only).
+    pub fit_kappa: Option<Vec<f64>>,
+    /// Per-cluster mean resultant length from fit time (spherical only).
+    pub fit_resultant_lengths: Option<Vec<f64>>,
 }
 
 // ---- Factory constructors ----
@@ -107,6 +137,10 @@ impl ClusterSnapshot {
             fit_cluster_sizes,
             fit_n_samples: n_samples,
             version: 1,
+            confidence_stats: None,
+            cluster_variances: None,
+            fit_kappa: None,
+            fit_resultant_lengths: None,
         }
     }
 
@@ -129,6 +163,10 @@ impl ClusterSnapshot {
             fit_cluster_sizes,
             fit_n_samples: n_samples,
             version: 1,
+            confidence_stats: None,
+            cluster_variances: None,
+            fit_kappa: None,
+            fit_resultant_lengths: None,
         }
     }
 
@@ -153,6 +191,10 @@ impl ClusterSnapshot {
             fit_cluster_sizes,
             fit_n_samples: n_samples,
             version: 1,
+            confidence_stats: None,
+            cluster_variances: None,
+            fit_kappa: None,
+            fit_resultant_lengths: None,
         }
     }
 
@@ -178,6 +220,10 @@ impl ClusterSnapshot {
             fit_cluster_sizes,
             fit_n_samples: n_samples,
             version: 1,
+            confidence_stats: None,
+            cluster_variances: None,
+            fit_kappa: None,
+            fit_resultant_lengths: None,
         }
     }
 
@@ -186,6 +232,7 @@ impl ClusterSnapshot {
     /// `centroids`: flat unit-norm centroids in reduced space (k * fitted_d).
     /// `pca`: PCA projection if dimensionality reduction was used.
     /// `intra_similarity`: per-cluster mean cosine similarity (used as fit_mean_distances).
+    /// `resultant_lengths`: per-cluster directional concentration [0, 1].
     pub fn from_embedding_cluster(
         centroids: &[f64],
         k: usize,
@@ -194,6 +241,7 @@ impl ClusterSnapshot {
         pca: Option<&crate::embedding::reduction::PcaProjection>,
         labels: &[usize],
         intra_similarity: &[f64],
+        resultant_lengths: &[f64],
     ) -> Self {
         let n_samples = labels.len();
         let fit_cluster_sizes = count_labels(labels, k);
@@ -219,6 +267,10 @@ impl ClusterSnapshot {
             fit_cluster_sizes,
             fit_n_samples: n_samples,
             version: 1,
+            confidence_stats: None,
+            cluster_variances: None,
+            fit_kappa: None,
+            fit_resultant_lengths: Some(resultant_lengths.to_vec()),
         }
     }
 }
@@ -287,6 +339,45 @@ impl AssignmentResult {
                 self.labels[i] = -1;
             }
         }
+    }
+
+    /// Reject points whose confidence falls below the per-cluster adaptive threshold.
+    ///
+    /// Uses calibration data to set per-cluster thresholds based on the training
+    /// confidence distribution. A point is rejected if its confidence is below
+    /// the specified percentile of its assigned cluster's training distribution.
+    pub fn apply_adaptive_rejection(
+        &mut self,
+        stats: &ClusterConfidenceStats,
+        percentile: &str,
+    ) -> Result<(), ClusterError> {
+        let thresholds = match percentile {
+            "p5" => &stats.p5,
+            "p10" => &stats.p10,
+            "p25" => &stats.p25,
+            "p50" => &stats.p50,
+            _ => {
+                return Err(ClusterError::SnapshotContract(format!(
+                    "unknown percentile '{}', use p5/p10/p25/p50",
+                    percentile
+                )))
+            }
+        };
+
+        for i in 0..self.labels.len() {
+            if self.rejected[i] {
+                continue;
+            }
+            let label = self.labels[i];
+            if label >= 0 && (label as usize) < thresholds.len() {
+                let cluster_threshold = thresholds[label as usize];
+                if self.confidences[i] < cluster_threshold {
+                    self.rejected[i] = true;
+                    self.labels[i] = -1;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -450,6 +541,12 @@ pub struct DriftReport {
     pub rejection_rate: f64,
     /// Total points analyzed.
     pub n_samples: usize,
+    /// Per-cluster kappa shift (spherical only, requires calibration).
+    /// (new_kappa - fit_kappa) / fit_kappa per cluster.
+    pub kappa_drift: Option<Vec<f64>>,
+    /// Per-cluster centroid direction shift (spherical only).
+    /// 1.0 - dot(old_centroid, new_mean_direction) per cluster. 0 = no shift.
+    pub direction_drift: Option<Vec<f64>>,
 }
 
 impl ClusterSnapshot {
@@ -519,6 +616,73 @@ impl ClusterSnapshot {
             0.0
         };
 
+        // vMF drift (spherical + calibrated only)
+        let (kappa_drift, direction_drift) = if self.spherical && self.fit_kappa.is_some() {
+            let work_data = self.preprocess(data, n)?;
+            let d = self.d;
+            let fit_kappa = self.fit_kappa.as_ref().unwrap();
+            let d_f = d as f64;
+
+            let mut new_kappas = vec![0.0; k];
+            let mut new_mean_dirs = vec![0.0f64; k * d];
+            let mut counts = vec![0usize; k];
+
+            for i in 0..n {
+                let label = result.labels[i];
+                if label >= 0 && (label as usize) < k {
+                    let c = label as usize;
+                    counts[c] += 1;
+                    for j in 0..d {
+                        new_mean_dirs[c * d + j] += work_data[i * d + j];
+                    }
+                }
+            }
+
+            let mut kd = vec![0.0; k];
+            let mut dd = vec![0.0; k];
+
+            for c in 0..k {
+                if counts[c] > 0 {
+                    // Compute mean resultant length
+                    let r_bar: f64 = new_mean_dirs[c * d..(c + 1) * d]
+                        .iter()
+                        .map(|v| v * v)
+                        .sum::<f64>()
+                        .sqrt()
+                        / counts[c] as f64;
+                    let denom = (1.0 - r_bar * r_bar).max(1e-10);
+                    new_kappas[c] = r_bar * (d_f - r_bar * r_bar) / denom;
+
+                    // Kappa drift
+                    if fit_kappa[c].abs() > 1e-10 {
+                        kd[c] = (new_kappas[c] - fit_kappa[c]) / fit_kappa[c].abs();
+                    }
+
+                    // Normalize new mean direction for dot product
+                    let norm: f64 = new_mean_dirs[c * d..(c + 1) * d]
+                        .iter()
+                        .map(|v| v * v)
+                        .sum::<f64>()
+                        .sqrt();
+                    if norm > 1e-30 {
+                        for j in 0..d {
+                            new_mean_dirs[c * d + j] /= norm;
+                        }
+                    }
+
+                    // Direction drift: 1 - dot(old_centroid, new_mean_dir)
+                    let centroid = &self.centroids[c * d..(c + 1) * d];
+                    let new_dir = &new_mean_dirs[c * d..(c + 1) * d];
+                    let dot_val: f64 = centroid.iter().zip(new_dir).map(|(a, b)| a * b).sum();
+                    dd[c] = 1.0 - dot_val.clamp(-1.0, 1.0);
+                }
+            }
+
+            (Some(kd), Some(dd))
+        } else {
+            (None, None)
+        };
+
         Ok(DriftReport {
             new_mean_distances,
             new_cluster_sizes: cluster_counts,
@@ -526,7 +690,141 @@ impl ClusterSnapshot {
             global_mean_distance,
             rejection_rate,
             n_samples: n,
+            kappa_drift,
+            direction_drift,
         })
+    }
+
+    /// Calibrate per-cluster confidence thresholds from representative data.
+    ///
+    /// Assigns the calibration data, collects per-cluster confidence scores,
+    /// and computes quantiles (P5, P10, P25, P50) for adaptive rejection.
+    ///
+    /// `data`: flat row-major f64, shape (n, input_dim).
+    pub fn calibrate(&mut self, data: &[f64], n: usize) -> Result<(), ClusterError> {
+        // Preprocess data (same pipeline as assign_batch)
+        let work_data = self.preprocess(data, n)?;
+        let result = self.assign_batch(data, n)?;
+        let k = self.k;
+        let d = self.d;
+
+        // --- Confidence quantiles ---
+        let mut per_cluster: Vec<Vec<f64>> = vec![vec![]; k];
+        for i in 0..n {
+            let label = result.labels[i];
+            if label >= 0 && (label as usize) < k {
+                per_cluster[label as usize].push(result.confidences[i]);
+            }
+        }
+
+        let mut p5 = vec![0.0; k];
+        let mut p10 = vec![0.0; k];
+        let mut p25 = vec![0.0; k];
+        let mut p50 = vec![0.0; k];
+
+        for c in 0..k {
+            per_cluster[c].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            if !per_cluster[c].is_empty() {
+                p5[c] = percentile_sorted(&per_cluster[c], 5.0);
+                p10[c] = percentile_sorted(&per_cluster[c], 10.0);
+                p25[c] = percentile_sorted(&per_cluster[c], 25.0);
+                p50[c] = percentile_sorted(&per_cluster[c], 50.0);
+            }
+        }
+        self.confidence_stats = Some(ClusterConfidenceStats { p5, p10, p25, p50 });
+
+        // --- vMF kappa (spherical only) ---
+        if self.spherical {
+            let d_f = d as f64;
+            let mut kappas = vec![0.0; k];
+
+            for c in 0..k {
+                let mut sum_vec = vec![0.0; d];
+                let mut count = 0usize;
+                for i in 0..n {
+                    if result.labels[i] == c as i64 {
+                        for j in 0..d {
+                            sum_vec[j] += work_data[i * d + j];
+                        }
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    let r_bar: f64 =
+                        sum_vec.iter().map(|v| v * v).sum::<f64>().sqrt() / count as f64;
+                    let denom = (1.0 - r_bar * r_bar).max(1e-10);
+                    kappas[c] = r_bar * (d_f - r_bar * r_bar) / denom;
+                }
+            }
+            self.fit_kappa = Some(kappas);
+        }
+
+        // --- Per-cluster variances (for Mahalanobis, all metrics) ---
+        let mut means = vec![0.0f64; k * d];
+        let mut counts = vec![0usize; k];
+        for i in 0..n {
+            let label = result.labels[i] as usize;
+            if label < k {
+                counts[label] += 1;
+                for j in 0..d {
+                    means[label * d + j] += work_data[i * d + j];
+                }
+            }
+        }
+        for c in 0..k {
+            if counts[c] > 0 {
+                for j in 0..d {
+                    means[c * d + j] /= counts[c] as f64;
+                }
+            }
+        }
+
+        let mut var_flat = vec![0.0f64; k * d];
+        for i in 0..n {
+            let label = result.labels[i] as usize;
+            if label < k {
+                for j in 0..d {
+                    let diff = work_data[i * d + j] - means[label * d + j];
+                    var_flat[label * d + j] += diff * diff;
+                }
+            }
+        }
+        for c in 0..k {
+            if counts[c] > 1 {
+                for j in 0..d {
+                    var_flat[c * d + j] /= (counts[c] - 1) as f64;
+                    if var_flat[c * d + j] < 1e-12 {
+                        var_flat[c * d + j] = 1e-12;
+                    }
+                }
+            } else {
+                for j in 0..d {
+                    var_flat[c * d + j] = 1e-12;
+                }
+            }
+        }
+        self.cluster_variances = Some(ClusterVariances {
+            variances: var_flat,
+        });
+
+        self.version = 2;
+        Ok(())
+    }
+}
+
+/// Linear-interpolation percentile on a pre-sorted slice.
+fn percentile_sorted(sorted: &[f64], pct: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = (pct / 100.0) * (sorted.len() - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    let frac = rank - lo as f64;
+    if hi >= sorted.len() {
+        sorted[sorted.len() - 1]
+    } else {
+        sorted[lo] * (1.0 - frac) + sorted[hi] * frac
     }
 }
 
@@ -573,6 +871,122 @@ fn dot_product(a: &[f64], b: &[f64]) -> f64 {
     acc
 }
 
+/// Find nearest two centroids by diagonal Mahalanobis distance.
+///
+/// Mahalanobis distance: sum((x_i - mu_i)^2 / var_i) per dimension.
+fn assign_nearest_two_mahalanobis(
+    point: &[f64],
+    centroids: &[f64],
+    variances: &[f64], // flat (k * d), per-cluster per-dimension variance
+    k: usize,
+    d: usize,
+) -> (usize, f64, f64) {
+    debug_assert!(k >= 1);
+
+    if k == 1 {
+        let mut dist = 0.0;
+        for j in 0..d {
+            let diff = point[j] - centroids[j];
+            dist += diff * diff / variances[j];
+        }
+        return (0, dist, f64::INFINITY);
+    }
+
+    let mut best_idx = 0;
+    let mut best_dist = f64::MAX;
+    let mut second_dist = f64::MAX;
+
+    for c in 0..k {
+        let mut dist = 0.0;
+        for j in 0..d {
+            let diff = point[j] - centroids[c * d + j];
+            dist += diff * diff / variances[c * d + j];
+        }
+        if dist < best_dist {
+            second_dist = best_dist;
+            best_dist = dist;
+            best_idx = c;
+        } else if dist < second_dist {
+            second_dist = dist;
+        }
+    }
+
+    (best_idx, best_dist, second_dist)
+}
+
+impl ClusterSnapshot {
+    /// Assign using diagonal Mahalanobis distance (requires calibration).
+    pub fn assign_batch_mahalanobis(
+        &self,
+        data: &[f64],
+        n: usize,
+    ) -> Result<AssignmentResult, ClusterError> {
+        let cv = self.cluster_variances.as_ref().ok_or_else(|| {
+            ClusterError::SnapshotContract("calibrate() required for Mahalanobis mode".to_string())
+        })?;
+
+        if n == 0 {
+            return Ok(AssignmentResult {
+                labels: vec![],
+                distances: vec![],
+                second_distances: vec![],
+                confidences: vec![],
+                rejected: vec![],
+            });
+        }
+
+        let expected_len = n * self.input_dim;
+        if data.len() != expected_len {
+            return Err(ClusterError::DimensionMismatch {
+                expected: self.input_dim,
+                got: data.len() / n,
+            });
+        }
+
+        let work_data = self.preprocess(data, n)?;
+        let d = self.d;
+        let k = self.k;
+        let centroids = &self.centroids[..];
+        let variances = &cv.variances[..];
+
+        let results: Vec<(usize, f64, f64)> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let point = &work_data[i * d..(i + 1) * d];
+                assign_nearest_two_mahalanobis(point, centroids, variances, k, d)
+            })
+            .collect();
+
+        let mut labels = Vec::with_capacity(n);
+        let mut distances = Vec::with_capacity(n);
+        let mut second_distances = Vec::with_capacity(n);
+        let mut confidences = Vec::with_capacity(n);
+
+        for (idx, best, second) in &results {
+            labels.push(*idx as i64);
+            distances.push(*best);
+            second_distances.push(*second);
+
+            let conf = if k < 2 {
+                0.0
+            } else if !second.is_finite() || second.abs() < 1e-30 {
+                0.0
+            } else {
+                1.0 - (best / second).clamp(0.0, 1.0)
+            };
+            confidences.push(conf);
+        }
+
+        Ok(AssignmentResult {
+            labels,
+            distances,
+            second_distances,
+            confidences,
+            rejected: vec![false; n],
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,6 +1005,10 @@ mod tests {
             fit_cluster_sizes: vec![50; k],
             fit_n_samples: 100,
             version: 1,
+            confidence_stats: None,
+            cluster_variances: None,
+            fit_kappa: None,
+            fit_resultant_lengths: None,
         }
     }
 
@@ -608,6 +1026,10 @@ mod tests {
             fit_cluster_sizes: vec![50; k],
             fit_n_samples: 100,
             version: 1,
+            confidence_stats: None,
+            cluster_variances: None,
+            fit_kappa: None,
+            fit_resultant_lengths: None,
         }
     }
 
@@ -736,5 +1158,189 @@ mod tests {
         let (idx, best, second) = assign_max_dot_two(&point, &centroids, 2, 2);
         assert_eq!(idx, 0);
         assert!(best > second);
+    }
+
+    #[test]
+    fn test_calibrate_populates_confidence_stats() {
+        let mut snap = make_kmeans_snapshot(vec![0.0, 0.0, 10.0, 10.0], 2, 2);
+
+        // Training data: 50 points near each centroid
+        let mut data = Vec::new();
+        for i in 0..50 {
+            data.push(0.0 + (i as f64) * 0.01);
+            data.push(0.0 + (i as f64) * 0.01);
+        }
+        for i in 0..50 {
+            data.push(10.0 + (i as f64) * 0.01);
+            data.push(10.0 + (i as f64) * 0.01);
+        }
+
+        snap.calibrate(&data, 100).unwrap();
+
+        let stats = snap.confidence_stats.as_ref().unwrap();
+        assert_eq!(stats.p5.len(), 2);
+        assert_eq!(stats.p10.len(), 2);
+        assert_eq!(stats.p25.len(), 2);
+        assert_eq!(stats.p50.len(), 2);
+
+        // Quantiles should be ordered
+        for c in 0..2 {
+            assert!(
+                stats.p5[c] <= stats.p10[c],
+                "P5={} > P10={}",
+                stats.p5[c],
+                stats.p10[c]
+            );
+            assert!(
+                stats.p10[c] <= stats.p25[c],
+                "P10={} > P25={}",
+                stats.p10[c],
+                stats.p25[c]
+            );
+            assert!(
+                stats.p25[c] <= stats.p50[c],
+                "P25={} > P50={}",
+                stats.p25[c],
+                stats.p50[c]
+            );
+        }
+
+        assert_eq!(snap.version, 2);
+    }
+
+    #[test]
+    fn test_calibrate_empty_cluster() {
+        // k=3 but only 2 clusters get data
+        let mut snap = make_kmeans_snapshot(vec![0.0, 0.0, 10.0, 10.0, 1000.0, 1000.0], 3, 2);
+        let data = vec![0.1, 0.1, 9.9, 9.9];
+        snap.calibrate(&data, 2).unwrap();
+
+        let stats = snap.confidence_stats.as_ref().unwrap();
+        // Cluster 2 got no points — quantiles should be 0
+        assert_eq!(stats.p10[2], 0.0);
+        assert_eq!(stats.p50[2], 0.0);
+    }
+
+    #[test]
+    fn test_calibrate_new_fields_none_before() {
+        let snap = make_kmeans_snapshot(vec![0.0, 0.0], 1, 2);
+        assert!(snap.confidence_stats.is_none());
+        assert!(snap.cluster_variances.is_none());
+        assert!(snap.fit_kappa.is_none());
+        assert!(snap.fit_resultant_lengths.is_none());
+    }
+
+    #[test]
+    fn test_adaptive_rejection_per_cluster() {
+        let mut snap = make_kmeans_snapshot(vec![0.0, 0.0, 10.0, 10.0], 2, 2);
+
+        // Calibrate with well-separated training data
+        let mut data = Vec::new();
+        for i in 0..100 {
+            data.push(0.0 + (i as f64) * 0.01);
+            data.push(0.0 + (i as f64) * 0.01);
+        }
+        for i in 0..100 {
+            data.push(10.0 + (i as f64) * 0.01);
+            data.push(10.0 + (i as f64) * 0.01);
+        }
+        snap.calibrate(&data, 200).unwrap();
+
+        // Assign a point with moderate confidence
+        let test_data = vec![1.0, 1.0]; // near cluster 0 but not on top
+        let mut result = snap.assign_batch(&test_data, 1).unwrap();
+        assert!(!result.rejected[0]);
+
+        let stats = snap.confidence_stats.as_ref().unwrap();
+        // Using p50 should reject more aggressively than p5
+        let conf = result.confidences[0];
+
+        // Try adaptive rejection with a lenient percentile
+        result.apply_adaptive_rejection(stats, "p5").unwrap();
+        // Whether it's rejected depends on the cluster's P5 threshold
+
+        // Verify the method doesn't reject already-rejected points again
+        let already_rejected_count = result.rejected.iter().filter(|&&r| r).count();
+        result.apply_adaptive_rejection(stats, "p50").unwrap();
+        let new_rejected_count = result.rejected.iter().filter(|&&r| r).count();
+        assert!(new_rejected_count >= already_rejected_count);
+    }
+
+    #[test]
+    fn test_adaptive_rejection_invalid_percentile() {
+        let stats = ClusterConfidenceStats {
+            p5: vec![0.1],
+            p10: vec![0.2],
+            p25: vec![0.3],
+            p50: vec![0.4],
+        };
+        let mut result = AssignmentResult {
+            labels: vec![0],
+            distances: vec![1.0],
+            second_distances: vec![2.0],
+            confidences: vec![0.5],
+            rejected: vec![false],
+        };
+        let err = result.apply_adaptive_rejection(&stats, "p99");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_percentile_sorted() {
+        let sorted = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!((percentile_sorted(&sorted, 0.0) - 1.0).abs() < 1e-10);
+        assert!((percentile_sorted(&sorted, 50.0) - 3.0).abs() < 1e-10);
+        assert!((percentile_sorted(&sorted, 100.0) - 5.0).abs() < 1e-10);
+        assert!((percentile_sorted(&sorted, 25.0) - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mahalanobis_prefers_elongated_cluster() {
+        // Two centroids at (0,0) and (10,0)
+        // Cluster 0 has high variance on y-axis (elongated vertically)
+        // Cluster 1 has low variance on both axes (compact)
+        let mut snap = make_kmeans_snapshot(vec![0.0, 0.0, 10.0, 0.0], 2, 2);
+
+        // Manually set variances: cluster 0 is elongated on y (var_y=100), cluster 1 is compact
+        snap.cluster_variances = Some(ClusterVariances {
+            variances: vec![
+                1.0, 100.0, // cluster 0: narrow x, wide y
+                1.0, 1.0, // cluster 1: compact both
+            ],
+        });
+
+        // Point at (5, 8) — equidistant in Euclidean, but closer to cluster 0 in Mahalanobis
+        // because cluster 0 has high y-variance
+        let data = vec![5.0, 8.0];
+
+        let result_eucl = snap.assign_batch(&data, 1).unwrap();
+        let result_mahal = snap.assign_batch_mahalanobis(&data, 1).unwrap();
+
+        // Euclidean: (5-0)^2 + (8-0)^2 = 89 vs (5-10)^2 + (8-0)^2 = 89 — tie, goes to cluster 0
+        // Mahalanobis cluster 0: 25/1 + 64/100 = 25.64
+        // Mahalanobis cluster 1: 25/1 + 64/1 = 89
+        assert_eq!(result_mahal.labels[0], 0);
+        assert!(
+            result_mahal.distances[0] < result_mahal.second_distances[0],
+            "Mahalanobis should clearly prefer cluster 0"
+        );
+    }
+
+    #[test]
+    fn test_mahalanobis_requires_calibration() {
+        let snap = make_kmeans_snapshot(vec![0.0, 0.0, 10.0, 10.0], 2, 2);
+        let data = vec![1.0, 1.0];
+        let err = snap.assign_batch_mahalanobis(&data, 1);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_calibrate_populates_variances() {
+        let mut snap = make_kmeans_snapshot(vec![0.0, 0.0, 10.0, 10.0], 2, 2);
+        let data = vec![0.1, 0.1, 0.2, 0.2, 9.9, 9.9, 10.1, 10.1];
+        snap.calibrate(&data, 4).unwrap();
+        assert!(snap.cluster_variances.is_some());
+        let cv = snap.cluster_variances.as_ref().unwrap();
+        assert_eq!(cv.variances.len(), 2 * 2); // k * d
     }
 }

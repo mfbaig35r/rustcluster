@@ -12,9 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::embedding::reduction::PcaProjection;
 use crate::error::ClusterError;
-use crate::snapshot::{ClusterSnapshot, Preprocessing, SnapshotAlgorithm};
+use crate::snapshot::{
+    ClusterConfidenceStats, ClusterSnapshot, ClusterVariances, Preprocessing, SnapshotAlgorithm,
+};
 
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct SnapshotMetadata {
@@ -33,6 +35,20 @@ struct SnapshotMetadata {
     pca_input_dim: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pca_output_dim: Option<usize>,
+
+    // v2 calibration fields
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    confidence_p5: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    confidence_p10: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    confidence_p25: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    confidence_p50: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    fit_kappa: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    fit_resultant_lengths: Option<Vec<f64>>,
 }
 
 /// Save a snapshot to a directory.
@@ -72,6 +88,14 @@ pub fn save_snapshot(snapshot: &ClusterSnapshot, dir: &str) -> Result<(), Cluste
         _ => (None, None),
     };
 
+    // Cluster variances tensor (optional, from calibrate)
+    if let Some(ref cv) = snapshot.cluster_variances {
+        let var_bytes = f64_slice_to_bytes(&cv.variances);
+        let var_view = TensorView::new(Dtype::F64, vec![snapshot.k, snapshot.d], var_bytes)
+            .map_err(|e| ClusterError::SnapshotFormat(format!("cluster_variances tensor: {e}")))?;
+        tensors.insert("cluster_variances".to_string(), var_view);
+    }
+
     // Write safetensors
     let tensors_path = dir_path.join("centroids.safetensors");
     safetensors::serialize_to_file(&tensors, &None, &tensors_path)
@@ -83,6 +107,18 @@ pub fn save_snapshot(snapshot: &ClusterSnapshot, dir: &str) -> Result<(), Cluste
         Preprocessing::L2Normalize => "l2_normalize",
         Preprocessing::EmbeddingPipeline { .. } => "embedding_pipeline",
     };
+
+    // Extract calibration fields
+    let (confidence_p5, confidence_p10, confidence_p25, confidence_p50) =
+        match &snapshot.confidence_stats {
+            Some(stats) => (
+                Some(stats.p5.clone()),
+                Some(stats.p10.clone()),
+                Some(stats.p25.clone()),
+                Some(stats.p50.clone()),
+            ),
+            None => (None, None, None, None),
+        };
 
     let metadata = SnapshotMetadata {
         version: snapshot.version,
@@ -98,6 +134,12 @@ pub fn save_snapshot(snapshot: &ClusterSnapshot, dir: &str) -> Result<(), Cluste
         fit_n_samples: snapshot.fit_n_samples,
         pca_input_dim,
         pca_output_dim,
+        confidence_p5,
+        confidence_p10,
+        confidence_p25,
+        confidence_p50,
+        fit_kappa: snapshot.fit_kappa.clone(),
+        fit_resultant_lengths: snapshot.fit_resultant_lengths.clone(),
     };
 
     let json = serde_json::to_string_pretty(&metadata)
@@ -120,10 +162,10 @@ pub fn load_snapshot(dir: &str) -> Result<ClusterSnapshot, ClusterError> {
     let metadata: SnapshotMetadata = serde_json::from_str(&meta_json)
         .map_err(|e| ClusterError::SnapshotFormat(format!("parse metadata: {e}")))?;
 
-    // Version check
-    if metadata.version != SNAPSHOT_VERSION {
+    // Version check — accept v1 and v2
+    if metadata.version < 1 || metadata.version > SNAPSHOT_VERSION {
         return Err(ClusterError::SnapshotFormat(format!(
-            "unsupported version {}, expected {}",
+            "unsupported version {}, expected 1-{}",
             metadata.version, SNAPSHOT_VERSION
         )));
     }
@@ -186,6 +228,27 @@ pub fn load_snapshot(dir: &str) -> Result<ClusterSnapshot, ClusterError> {
         .parse()
         .map_err(|_| ClusterError::SnapshotFormat(format!("bad metric: {}", metadata.metric)))?;
 
+    // Reconstruct calibration data from metadata
+    let confidence_stats = match (
+        metadata.confidence_p5,
+        metadata.confidence_p10,
+        metadata.confidence_p25,
+        metadata.confidence_p50,
+    ) {
+        (Some(p5), Some(p10), Some(p25), Some(p50)) => {
+            Some(ClusterConfidenceStats { p5, p10, p25, p50 })
+        }
+        _ => None,
+    };
+
+    // Load cluster variances tensor if present
+    let cluster_variances = tensors
+        .tensor("cluster_variances")
+        .ok()
+        .map(|t| ClusterVariances {
+            variances: bytes_to_f64_vec(t.data()),
+        });
+
     Ok(ClusterSnapshot {
         algorithm,
         metric,
@@ -199,6 +262,10 @@ pub fn load_snapshot(dir: &str) -> Result<ClusterSnapshot, ClusterError> {
         fit_cluster_sizes: metadata.fit_cluster_sizes,
         fit_n_samples: metadata.fit_n_samples,
         version: metadata.version,
+        confidence_stats,
+        cluster_variances,
+        fit_kappa: metadata.fit_kappa,
+        fit_resultant_lengths: metadata.fit_resultant_lengths,
     })
 }
 
@@ -247,6 +314,10 @@ mod tests {
             fit_cluster_sizes: vec![50, 50],
             fit_n_samples: 100,
             version: 1,
+            confidence_stats: None,
+            cluster_variances: None,
+            fit_kappa: None,
+            fit_resultant_lengths: None,
         }
     }
 
@@ -270,6 +341,10 @@ mod tests {
             fit_cluster_sizes: vec![30, 30],
             fit_n_samples: 60,
             version: 1,
+            confidence_stats: None,
+            cluster_variances: None,
+            fit_kappa: None,
+            fit_resultant_lengths: None,
         }
     }
 
@@ -364,5 +439,62 @@ mod tests {
         let r1 = snap.assign_batch(&data, 2).unwrap();
         let r2 = loaded.assign_batch(&data, 2).unwrap();
         assert_eq!(r1.labels, r2.labels);
+    }
+
+    #[test]
+    fn test_save_load_v2_with_calibration() {
+        let mut snap = make_test_snapshot();
+
+        // Calibrate with some data
+        let data = vec![0.1, 0.1, 0.2, 0.2, 9.9, 9.9, 10.1, 10.1];
+        snap.calibrate(&data, 4).unwrap();
+        assert!(snap.confidence_stats.is_some());
+        assert_eq!(snap.version, 2);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2_snap");
+        let path_str = path.to_str().unwrap();
+
+        save_snapshot(&snap, path_str).unwrap();
+        let loaded = load_snapshot(path_str).unwrap();
+
+        // Confidence stats should round-trip (approx due to JSON float serialization)
+        assert!(loaded.confidence_stats.is_some());
+        let orig = snap.confidence_stats.as_ref().unwrap();
+        let load = loaded.confidence_stats.as_ref().unwrap();
+        for (a, b) in orig.p10.iter().zip(load.p10.iter()) {
+            assert!((a - b).abs() < 1e-12, "p10 mismatch: {a} vs {b}");
+        }
+        for (a, b) in orig.p50.iter().zip(load.p50.iter()) {
+            assert!((a - b).abs() < 1e-12, "p50 mismatch: {a} vs {b}");
+        }
+        assert_eq!(loaded.version, 2);
+    }
+
+    #[test]
+    fn test_v1_snapshot_loads_in_v2() {
+        // Create a v1-style metadata.json (no calibration fields)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1_snap");
+        fs::create_dir_all(&path).unwrap();
+
+        let meta = r#"{"version":1,"algorithm":"kmeans","metric":"euclidean","spherical":false,"k":2,"d":2,"input_dim":2,"preprocessing":"none","fit_mean_distances":[1.0,2.0],"fit_cluster_sizes":[50,50],"fit_n_samples":100}"#;
+        fs::write(path.join("metadata.json"), meta).unwrap();
+
+        // Write minimal centroids
+        let centroids = vec![0.0f64, 0.0, 10.0, 10.0];
+        let centroids_bytes = f64_slice_to_bytes(&centroids);
+        let centroids_view = TensorView::new(Dtype::F64, vec![2, 2], centroids_bytes).unwrap();
+        let mut tensors: HashMap<String, TensorView<'_>> = HashMap::new();
+        tensors.insert("centroids".to_string(), centroids_view);
+        safetensors::serialize_to_file(&tensors, &None, &path.join("centroids.safetensors"))
+            .unwrap();
+
+        let loaded = load_snapshot(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.k, 2);
+        assert_eq!(loaded.version, 1);
+        assert!(loaded.confidence_stats.is_none());
+        assert!(loaded.cluster_variances.is_none());
+        assert!(loaded.fit_kappa.is_none());
     }
 }

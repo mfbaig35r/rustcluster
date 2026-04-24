@@ -32,21 +32,40 @@ class ClusterSnapshot:
     def __init__(self, _rust_snapshot):
         self._snap = _rust_snapshot
 
-    def assign(self, X):
+    def assign(self, X, *, boundary_mode="voronoi"):
         """Assign new points to the nearest cluster.
 
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
+        boundary_mode : str, default="voronoi"
+            "voronoi" (nearest centroid) or "mahalanobis" (diagonal Mahalanobis).
+            Mahalanobis requires ``calibrate()`` first.
 
         Returns
         -------
         labels : ndarray of shape (n_samples,), dtype int64
         """
         X = _prepare_array(X)
-        return self._snap.assign(X)
+        return self._snap.assign(X, boundary_mode=boundary_mode)
 
-    def assign_with_scores(self, X, *, distance_threshold=None, confidence_threshold=None):
+    def calibrate(self, X):
+        """Calibrate per-cluster confidence thresholds from representative data.
+
+        Call this with the training data (or a representative sample) to enable
+        adaptive rejection thresholds. Must be called before using
+        ``adaptive_threshold=True`` in ``assign_with_scores()``.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+        """
+        X = _prepare_array(X)
+        self._snap.calibrate(X)
+
+    def assign_with_scores(self, X, *, distance_threshold=None, confidence_threshold=None,
+                           adaptive_threshold=False, adaptive_percentile="p10",
+                           boundary_mode="voronoi"):
         """Assign with confidence scores and optional rejection.
 
         Parameters
@@ -56,6 +75,14 @@ class ClusterSnapshot:
             Reject points farther than this from all centroids.
         confidence_threshold : float, optional
             Reject points with confidence below this (0-1).
+        adaptive_threshold : bool, default=False
+            Use per-cluster adaptive thresholds from calibration data.
+            Requires ``calibrate()`` to have been called first.
+        adaptive_percentile : str, default="p10"
+            Which percentile to use for adaptive rejection: "p5", "p10", "p25", "p50".
+        boundary_mode : str, default="voronoi"
+            "voronoi" (nearest centroid) or "mahalanobis" (diagonal Mahalanobis).
+            Mahalanobis requires ``calibrate()`` first.
 
         Returns
         -------
@@ -67,6 +94,9 @@ class ClusterSnapshot:
             X,
             distance_threshold=distance_threshold,
             confidence_threshold=confidence_threshold,
+            adaptive_threshold=adaptive_threshold,
+            adaptive_percentile=adaptive_percentile,
+            boundary_mode=boundary_mode,
         )
 
     def drift_report(self, X):
@@ -122,6 +152,11 @@ class ClusterSnapshot:
     def spherical(self):
         """Whether assignment uses spherical (max-dot) logic."""
         return self._snap.spherical
+
+    @property
+    def is_calibrated(self):
+        """Whether calibrate() has been called."""
+        return self._snap.is_calibrated
 
     def __repr__(self):
         return (
