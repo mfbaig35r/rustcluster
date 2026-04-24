@@ -17,12 +17,15 @@ from rustcluster._rustcluster import (
     davies_bouldin_score as _davies_bouldin_score,
 )
 
+from rustcluster.snapshot import ClusterSnapshot
+
 __all__ = [
     "KMeans",
     "MiniBatchKMeans",
     "DBSCAN",
     "HDBSCAN",
     "AgglomerativeClustering",
+    "ClusterSnapshot",
     "silhouette_score",
     "calinski_harabasz_score",
     "davies_bouldin_score",
@@ -151,6 +154,10 @@ class KMeans:
             f"metric=\"{self._metric}\")"
         )
 
+    def snapshot(self):
+        """Create a frozen snapshot for incremental assignment."""
+        return ClusterSnapshot(self._model.snapshot())
+
     def __getstate__(self):
         return {"model_state": self._model.__getstate__(), "params": {
             "n_clusters": self._n_clusters, "max_iter": self._max_iter,
@@ -275,6 +282,10 @@ class MiniBatchKMeans:
             f"max_iter={self._max_iter}, tol={self._tol}, random_state={self._random_state}, "
             f"max_no_improvement={self._max_no_improvement}, metric=\"{self._metric}\")"
         )
+
+    def snapshot(self):
+        """Create a frozen snapshot for incremental assignment."""
+        return ClusterSnapshot(self._model.snapshot())
 
     def __getstate__(self):
         return {"model_state": self._model.__getstate__(), "params": {

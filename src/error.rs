@@ -65,13 +65,31 @@ pub enum ClusterError {
 
     #[error("Ward linkage requires euclidean metric")]
     WardRequiresEuclidean,
+
+    // ---- Snapshot ----
+    #[error("Snapshot I/O error: {0}")]
+    SnapshotIo(String),
+
+    #[error("Snapshot format error: {0}")]
+    SnapshotFormat(String),
+
+    #[error("Snapshot contract violation: {0}")]
+    SnapshotContract(String),
+
+    #[error("Algorithm '{0}' does not support cluster slotting")]
+    SlottingNotSupported(String),
 }
 
 #[cfg(feature = "python")]
 impl From<ClusterError> for pyo3::PyErr {
     fn from(err: ClusterError) -> pyo3::PyErr {
         match &err {
-            ClusterError::NotFitted => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            ClusterError::NotFitted | ClusterError::SlottingNotSupported(_) => {
+                pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
+            }
+            ClusterError::SnapshotIo(_) => {
+                pyo3::exceptions::PyIOError::new_err(err.to_string())
+            }
             _ => pyo3::exceptions::PyValueError::new_err(err.to_string()),
         }
     }

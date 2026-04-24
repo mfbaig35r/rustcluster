@@ -2,6 +2,8 @@ pub mod agglomerative;
 pub mod dbscan;
 pub mod distance;
 pub mod embedding;
+pub mod snapshot;
+pub mod snapshot_io;
 // dead_code: KdTree::build is superseded by build_v2, kept for reference
 mod error;
 mod hamerly;
@@ -324,6 +326,18 @@ mod python_bindings {
                 "KMeans(n_clusters={}, max_iter={}, tol={}, random_state={}, n_init={}, algorithm=\"{}\", metric=\"{}\")",
                 self.n_clusters, self.max_iter, self.tol, self.random_state, self.n_init, algo_str, met_str
             )
+        }
+
+        fn snapshot(&self) -> PyResult<PyClusterSnapshot> {
+            let metric = self.metric;
+            match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
+                FittedState::F64(state) => Ok(PyClusterSnapshot {
+                    inner: snapshot::ClusterSnapshot::from_kmeans(state, metric),
+                }),
+                FittedState::F32(state) => Ok(PyClusterSnapshot {
+                    inner: snapshot::ClusterSnapshot::from_kmeans_f32(state, metric),
+                }),
+            }
         }
 
         fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
@@ -1313,6 +1327,18 @@ mod python_bindings {
             )
         }
 
+        fn snapshot(&self) -> PyResult<PyClusterSnapshot> {
+            let metric = self.metric;
+            match self.fitted.as_ref().ok_or(ClusterError::NotFitted)? {
+                MiniBatchFittedState::F64(state) => Ok(PyClusterSnapshot {
+                    inner: snapshot::ClusterSnapshot::from_minibatch_kmeans(state, metric),
+                }),
+                MiniBatchFittedState::F32(state) => Ok(PyClusterSnapshot {
+                    inner: snapshot::ClusterSnapshot::from_minibatch_kmeans_f32(state, metric),
+                }),
+            }
+        }
+
         fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
             let dict = pyo3::types::PyDict::new(py);
             dict.set_item("n_clusters", self.n_clusters)?;
@@ -1778,6 +1804,25 @@ mod python_bindings {
             }
         }
 
+        fn snapshot(&self) -> PyResult<PyClusterSnapshot> {
+            let f = self.fitted.as_ref().ok_or(ClusterError::NotFitted)?;
+            let input_dim = match &f.pca_projection {
+                Some(proj) => proj.input_dim,
+                None => f.fitted_d,
+            };
+            Ok(PyClusterSnapshot {
+                inner: snapshot::ClusterSnapshot::from_embedding_cluster(
+                    &f.centroids,
+                    self.n_clusters,
+                    f.fitted_d,
+                    input_dim,
+                    f.pca_projection.as_ref(),
+                    &f.labels,
+                    &f.intra_similarity,
+                ),
+            })
+        }
+
         fn __repr__(&self) -> String {
             format!(
                 "EmbeddingCluster(n_clusters={}, reduction_dim={:?}, max_iter={}, n_init={})",
@@ -2047,6 +2092,234 @@ mod python_bindings {
         }
     }
 
+    // ---- ClusterSnapshot ----
+
+    use crate::snapshot;
+    use crate::snapshot_io;
+
+    #[pyclass(name = "ClusterSnapshot")]
+    struct PyClusterSnapshot {
+        inner: snapshot::ClusterSnapshot,
+    }
+
+    #[pymethods]
+    impl PyClusterSnapshot {
+        /// Assign new points to nearest cluster.
+        fn assign<'py>(
+            &self,
+            py: Python<'py>,
+            x: &Bound<'_, pyo3::types::PyAny>,
+        ) -> PyResult<Bound<'py, PyArray1<i64>>> {
+            let (data, n, d) = extract_f64_2d(x)?;
+            if d != self.inner.input_dim {
+                return Err(ClusterError::DimensionMismatch {
+                    expected: self.inner.input_dim,
+                    got: d,
+                }
+                .into());
+            }
+            let inner = &self.inner;
+            let result =
+                py.allow_threads(move || inner.assign_batch(&data, n))?;
+            Ok(PyArray1::from_vec(py, result.labels))
+        }
+
+        /// Assign with confidence scores and optional rejection.
+        #[pyo3(signature = (x, distance_threshold=None, confidence_threshold=None))]
+        fn assign_with_scores(
+            &self,
+            py: Python<'_>,
+            x: &Bound<'_, pyo3::types::PyAny>,
+            distance_threshold: Option<f64>,
+            confidence_threshold: Option<f64>,
+        ) -> PyResult<PyAssignmentResult> {
+            let (data, n, d) = extract_f64_2d(x)?;
+            if d != self.inner.input_dim {
+                return Err(ClusterError::DimensionMismatch {
+                    expected: self.inner.input_dim,
+                    got: d,
+                }
+                .into());
+            }
+            let inner = &self.inner;
+            let spherical = self.inner.spherical;
+            let mut result =
+                py.allow_threads(move || inner.assign_batch(&data, n))?;
+            result.apply_rejection(distance_threshold, confidence_threshold, spherical);
+            Ok(PyAssignmentResult { inner: result })
+        }
+
+        /// Save snapshot to directory.
+        fn save(&self, path: &str) -> PyResult<()> {
+            snapshot_io::save_snapshot(&self.inner, path)?;
+            Ok(())
+        }
+
+        /// Compute drift statistics against new data.
+        fn drift_report(
+            &self,
+            py: Python<'_>,
+            x: &Bound<'_, pyo3::types::PyAny>,
+        ) -> PyResult<PyDriftReport> {
+            let (data, n, d) = extract_f64_2d(x)?;
+            if d != self.inner.input_dim {
+                return Err(ClusterError::DimensionMismatch {
+                    expected: self.inner.input_dim,
+                    got: d,
+                }
+                .into());
+            }
+            let inner = &self.inner;
+            let report =
+                py.allow_threads(move || inner.drift_report(&data, n))?;
+            Ok(PyDriftReport { inner: report })
+        }
+
+        /// Load snapshot from directory.
+        #[staticmethod]
+        fn load(path: &str) -> PyResult<Self> {
+            let inner = snapshot_io::load_snapshot(path)?;
+            Ok(PyClusterSnapshot { inner })
+        }
+
+        #[getter]
+        fn k(&self) -> usize {
+            self.inner.k
+        }
+
+        #[getter]
+        fn d(&self) -> usize {
+            self.inner.d
+        }
+
+        #[getter]
+        fn input_dim(&self) -> usize {
+            self.inner.input_dim
+        }
+
+        #[getter]
+        fn algorithm(&self) -> &str {
+            self.inner.algorithm.as_str()
+        }
+
+        #[getter]
+        fn metric(&self) -> &str {
+            match self.inner.metric {
+                Metric::Euclidean => "euclidean",
+                Metric::Cosine => "cosine",
+                Metric::Manhattan => "manhattan",
+            }
+        }
+
+        #[getter]
+        fn spherical(&self) -> bool {
+            self.inner.spherical
+        }
+
+        fn __repr__(&self) -> String {
+            format!(
+                "ClusterSnapshot(algorithm=\"{}\", k={}, d={}, input_dim={})",
+                self.inner.algorithm.as_str(),
+                self.inner.k,
+                self.inner.d,
+                self.inner.input_dim
+            )
+        }
+    }
+
+    #[pyclass(name = "DriftReport")]
+    struct PyDriftReport {
+        inner: snapshot::DriftReport,
+    }
+
+    #[pymethods]
+    impl PyDriftReport {
+        #[getter]
+        fn new_mean_distances_<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+            PyArray1::from_vec(py, self.inner.new_mean_distances.clone())
+        }
+
+        #[getter]
+        fn new_cluster_sizes_<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+            PyArray1::from_vec(
+                py,
+                self.inner
+                    .new_cluster_sizes
+                    .iter()
+                    .map(|&c| c as i64)
+                    .collect(),
+            )
+        }
+
+        #[getter]
+        fn relative_drift_<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+            PyArray1::from_vec(py, self.inner.relative_drift.clone())
+        }
+
+        #[getter]
+        fn global_mean_distance_(&self) -> f64 {
+            self.inner.global_mean_distance
+        }
+
+        #[getter]
+        fn rejection_rate_(&self) -> f64 {
+            self.inner.rejection_rate
+        }
+
+        #[getter]
+        fn n_samples_(&self) -> usize {
+            self.inner.n_samples
+        }
+
+        fn __repr__(&self) -> String {
+            format!(
+                "DriftReport(n_samples={}, global_mean_distance={:.4}, rejection_rate={:.2}%)",
+                self.inner.n_samples,
+                self.inner.global_mean_distance,
+                self.inner.rejection_rate * 100.0
+            )
+        }
+    }
+
+    #[pyclass(name = "AssignmentResult")]
+    struct PyAssignmentResult {
+        inner: snapshot::AssignmentResult,
+    }
+
+    #[pymethods]
+    impl PyAssignmentResult {
+        #[getter]
+        fn labels_<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+            PyArray1::from_vec(py, self.inner.labels.clone())
+        }
+
+        #[getter]
+        fn distances_<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+            PyArray1::from_vec(py, self.inner.distances.clone())
+        }
+
+        #[getter]
+        fn second_distances_<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+            PyArray1::from_vec(py, self.inner.second_distances.clone())
+        }
+
+        #[getter]
+        fn confidences_<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+            PyArray1::from_vec(py, self.inner.confidences.clone())
+        }
+
+        #[getter]
+        fn rejected_<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+            Ok(PyArray1::from_vec(py, self.inner.rejected.clone()))
+        }
+
+        fn __repr__(&self) -> String {
+            let n = self.inner.labels.len();
+            let rejected = self.inner.rejected.iter().filter(|&&r| r).count();
+            format!("AssignmentResult(n={n}, rejected={rejected})")
+        }
+    }
+
     /// Helper: extract a 2D array as Vec<f64> + (n, d).
     fn extract_f64_2d(x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<(Vec<f64>, usize, usize)> {
         if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
@@ -2160,6 +2433,9 @@ mod python_bindings {
         m.add_class::<AgglomerativeClustering>()?;
         m.add_class::<EmbeddingCluster>()?;
         m.add_class::<EmbeddingReducer>()?;
+        m.add_class::<PyClusterSnapshot>()?;
+        m.add_class::<PyAssignmentResult>()?;
+        m.add_class::<PyDriftReport>()?;
         m.add_function(wrap_pyfunction!(silhouette_score, m)?)?;
         m.add_function(wrap_pyfunction!(calinski_harabasz_score, m)?)?;
         m.add_function(wrap_pyfunction!(davies_bouldin_score, m)?)?;

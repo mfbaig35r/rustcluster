@@ -19,6 +19,7 @@ use rayon::prelude::*;
 use crate::distance::Scalar;
 
 /// Result of randomized PCA.
+#[derive(Debug, Clone)]
 pub struct PcaProjection {
     /// Projection matrix, shape (input_dim, output_dim), stored flat row-major.
     pub components: Vec<f64>,

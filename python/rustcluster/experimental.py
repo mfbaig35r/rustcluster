@@ -148,6 +148,11 @@ class EmbeddingCluster:
         """Bayesian Information Criterion. Call refine_vmf() first."""
         return self._model.bic_
 
+    def snapshot(self):
+        """Create a frozen snapshot for incremental assignment."""
+        from rustcluster.snapshot import ClusterSnapshot
+        return ClusterSnapshot(self._model.snapshot())
+
     def __repr__(self):
         return (
             f"EmbeddingCluster(n_clusters={self._n_clusters}, "
