@@ -12,9 +12,10 @@ Fast, Rust-backed clustering for Python. Six algorithms, sklearn-compatible API,
 - **3 evaluation metrics**: silhouette score, Calinski-Harabasz, Davies-Bouldin
 - **KD-tree acceleration** for DBSCAN/HDBSCAN neighbor queries (10-200x on low-d data)
 - **Native f32/f64** — no silent upcast, doubles cache efficiency with f32
+- **Cluster slotting** — snapshot fitted clusters, assign new points 100x faster than refitting
 - **Pickle serialization** for all fitted models
 - **GIL released** during all compute — plays well with threads and async
-- **421 tests** across Rust and Python
+- **461 tests** across Rust and Python
 
 ## Installation
 
@@ -90,6 +91,47 @@ X_reduced = reducer.fit_transform(embeddings)  # instant — just truncates + L2
 ```
 
 See the [embedding clustering guide](docs/embedding-clustering-guide.md) for full documentation.
+
+### Cluster Slotting (Incremental Assignment)
+
+Fit once, assign new data forever. Snapshot freezes cluster centroids — new points are assigned without re-clustering:
+
+```python
+from rustcluster import KMeans, ClusterSnapshot
+
+# Fit and snapshot
+model = KMeans(n_clusters=50).fit(X_train)
+snapshot = model.snapshot()
+snapshot.save("clusters/")
+
+# Later: load and assign new data (no refit needed)
+snapshot = ClusterSnapshot.load("clusters/")
+labels = snapshot.assign(X_new)                   # 100x faster than refitting
+```
+
+Works with KMeans, MiniBatchKMeans, and EmbeddingCluster. EmbeddingCluster snapshots bake in the full preprocessing pipeline (L2-normalize, PCA, spherical assignment).
+
+**Confidence scoring and rejection:**
+
+```python
+result = snapshot.assign_with_scores(X_new, confidence_threshold=0.3)
+result.labels_       # -1 for rejected points
+result.confidences_  # [0, 1) — higher means more decisive assignment
+result.distances_    # distance to nearest centroid
+result.rejected_     # boolean mask
+```
+
+**Drift detection:**
+
+```python
+report = snapshot.drift_report(X_recent)
+report.global_mean_distance_  # compare to training baseline
+report.relative_drift_        # per-cluster drift
+```
+
+**Persistence:** safetensors (centroids) + JSON (metadata). A 50-cluster, 128d snapshot is ~50 KB vs GBs of training data.
+
+Validated on 323K CROSS ruling embeddings: 113x speedup, 99.86% training fidelity, equivalent purity to full refit.
 
 ### Mini-Batch K-Means
 
@@ -210,12 +252,20 @@ reducer.save("pca_128.bin")                   # 1.5 KB
 reducer = EmbeddingReducer.load("pca_128.bin") # instant
 ```
 
+ClusterSnapshot uses safetensors + JSON for portable, safe persistence:
+
+```python
+snapshot = model.snapshot()
+snapshot.save("clusters/")                     # safetensors + metadata.json
+snapshot = ClusterSnapshot.load("clusters/")   # zero-copy load
+```
+
 ## Development
 
 ```bash
 maturin develop --release              # build
-cargo test --no-default-features --lib # Rust tests (182)
-pytest tests/ -v                       # Python tests (239)
+cargo test --no-default-features --lib # Rust tests (197)
+pytest tests/ -v                       # Python tests (264)
 python benches/benchmark.py            # benchmark vs sklearn
 cargo fmt -- --check                   # formatting
 cargo clippy --no-default-features --lib -- -D warnings  # linting
