@@ -359,7 +359,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 # COMMAND ----------
 
-# Calibrate child snapshots too
+# Calibrate root and child snapshots
+hier.root.calibrate(X_train)
 for cid, child_snap in hier.children.items():
     mask = np.array(model.labels_) == cid
     if mask.sum() > 0:
