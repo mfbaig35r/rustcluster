@@ -15,7 +15,7 @@ Fast, Rust-backed clustering for Python. Six algorithms, sklearn-compatible API,
 - **Cluster slotting** — snapshot fitted clusters, assign new points 100x faster than refitting
 - **Pickle serialization** for all fitted models
 - **GIL released** during all compute — plays well with threads and async
-- **461 tests** across Rust and Python
+- **492 tests** across Rust and Python
 
 ## Installation
 
@@ -121,17 +121,43 @@ result.distances_    # distance to nearest centroid
 result.rejected_     # boolean mask
 ```
 
+**Adaptive thresholds (v2):** Per-cluster rejection thresholds calibrated from training data. Fixes the problem where a global threshold rejects too many points from diffuse clusters:
+
+```python
+snapshot.calibrate(X_train)  # compute per-cluster confidence distributions
+result = snapshot.assign_with_scores(X_new, adaptive_threshold=True, adaptive_percentile="p10")
+```
+
+**Mahalanobis boundaries (v2):** Diagonal Mahalanobis distance accounts for per-cluster, per-dimension variance:
+
+```python
+snapshot.calibrate(X_train)
+labels = snapshot.assign(X_new, boundary_mode="mahalanobis")
+```
+
 **Drift detection:**
 
 ```python
 report = snapshot.drift_report(X_recent)
 report.global_mean_distance_  # compare to training baseline
 report.relative_drift_        # per-cluster drift
+report.kappa_drift_           # vMF concentration shift (spherical only, v2)
+report.direction_drift_       # centroid direction shift (spherical only, v2)
+```
+
+**Hierarchical slotting (v2):** Cascading snapshots for multi-level classification (e.g., commodity → sub-commodity):
+
+```python
+from rustcluster.experimental import HierarchicalSnapshot
+
+hier = HierarchicalSnapshot.build(X_train, root_model, n_sub_clusters=10)
+root_labels, child_labels = hier.assign(X_new)
+hier.save("clusters/hierarchy/")
 ```
 
 **Persistence:** safetensors (centroids) + JSON (metadata). A 50-cluster, 128d snapshot is ~50 KB vs GBs of training data.
 
-Validated on 323K CROSS ruling embeddings: 113x speedup, 99.86% training fidelity, equivalent purity to full refit.
+Validated on 323K CROSS ruling embeddings (113x speedup, 99.86% fidelity) and 312K supplier embeddings (453x speedup, 99.94% fidelity). Hierarchical slotting improved heading purity from 37% to 54% on CROSS rulings.
 
 ### Mini-Batch K-Means
 
@@ -264,8 +290,8 @@ snapshot = ClusterSnapshot.load("clusters/")   # zero-copy load
 
 ```bash
 maturin develop --release              # build
-cargo test --no-default-features --lib # Rust tests (197)
-pytest tests/ -v                       # Python tests (264)
+cargo test --no-default-features --lib # Rust tests (208)
+pytest tests/ -v                       # Python tests (284)
 python benches/benchmark.py            # benchmark vs sklearn
 cargo fmt -- --check                   # formatting
 cargo clippy --no-default-features --lib -- -D warnings  # linting
