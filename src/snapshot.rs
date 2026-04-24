@@ -90,10 +90,7 @@ pub struct ClusterSnapshot {
 
 impl ClusterSnapshot {
     /// Create a snapshot from a fitted KMeansState (f64).
-    pub fn from_kmeans(
-        state: &crate::kmeans::KMeansState<f64>,
-        metric: Metric,
-    ) -> Self {
+    pub fn from_kmeans(state: &crate::kmeans::KMeansState<f64>, metric: Metric) -> Self {
         let (k, d) = state.centroids.dim();
         let n_samples = state.labels.len();
         let fit_cluster_sizes = count_labels(&state.labels, k);
@@ -114,10 +111,7 @@ impl ClusterSnapshot {
     }
 
     /// Create a snapshot from a fitted KMeansState (f32, converts to f64).
-    pub fn from_kmeans_f32(
-        state: &crate::kmeans::KMeansState<f32>,
-        metric: Metric,
-    ) -> Self {
+    pub fn from_kmeans_f32(state: &crate::kmeans::KMeansState<f32>, metric: Metric) -> Self {
         let (k, d) = state.centroids.dim();
         let n_samples = state.labels.len();
         let fit_cluster_sizes = count_labels(&state.labels, k);

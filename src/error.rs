@@ -87,9 +87,7 @@ impl From<ClusterError> for pyo3::PyErr {
             ClusterError::NotFitted | ClusterError::SlottingNotSupported(_) => {
                 pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
             }
-            ClusterError::SnapshotIo(_) => {
-                pyo3::exceptions::PyIOError::new_err(err.to_string())
-            }
+            ClusterError::SnapshotIo(_) => pyo3::exceptions::PyIOError::new_err(err.to_string()),
             _ => pyo3::exceptions::PyValueError::new_err(err.to_string()),
         }
     }

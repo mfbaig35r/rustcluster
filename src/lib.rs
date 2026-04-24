@@ -2119,8 +2119,7 @@ mod python_bindings {
                 .into());
             }
             let inner = &self.inner;
-            let result =
-                py.allow_threads(move || inner.assign_batch(&data, n))?;
+            let result = py.allow_threads(move || inner.assign_batch(&data, n))?;
             Ok(PyArray1::from_vec(py, result.labels))
         }
 
@@ -2143,8 +2142,7 @@ mod python_bindings {
             }
             let inner = &self.inner;
             let spherical = self.inner.spherical;
-            let mut result =
-                py.allow_threads(move || inner.assign_batch(&data, n))?;
+            let mut result = py.allow_threads(move || inner.assign_batch(&data, n))?;
             result.apply_rejection(distance_threshold, confidence_threshold, spherical);
             Ok(PyAssignmentResult { inner: result })
         }
@@ -2170,8 +2168,7 @@ mod python_bindings {
                 .into());
             }
             let inner = &self.inner;
-            let report =
-                py.allow_threads(move || inner.drift_report(&data, n))?;
+            let report = py.allow_threads(move || inner.drift_report(&data, n))?;
             Ok(PyDriftReport { inner: report })
         }
 

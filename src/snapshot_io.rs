@@ -47,30 +47,24 @@ pub fn save_snapshot(snapshot: &ClusterSnapshot, dir: &str) -> Result<(), Cluste
     let mut tensors: HashMap<String, TensorView<'_>> = HashMap::new();
 
     let centroids_bytes = f64_slice_to_bytes(&snapshot.centroids);
-    let centroids_view = TensorView::new(
-        Dtype::F64,
-        vec![snapshot.k, snapshot.d],
-        centroids_bytes,
-    )
-    .map_err(|e| ClusterError::SnapshotFormat(format!("centroids tensor: {e}")))?;
+    let centroids_view = TensorView::new(Dtype::F64, vec![snapshot.k, snapshot.d], centroids_bytes)
+        .map_err(|e| ClusterError::SnapshotFormat(format!("centroids tensor: {e}")))?;
     tensors.insert("centroids".to_string(), centroids_view);
 
     // PCA tensors (optional)
     let (pca_input_dim, pca_output_dim) = match &snapshot.preprocessing {
         Preprocessing::EmbeddingPipeline { pca, .. } => {
             let comp_bytes = f64_slice_to_bytes(&pca.components);
-            let comp_view = TensorView::new(
-                Dtype::F64,
-                vec![pca.input_dim, pca.output_dim],
-                comp_bytes,
-            )
-            .map_err(|e| ClusterError::SnapshotFormat(format!("pca_components tensor: {e}")))?;
+            let comp_view =
+                TensorView::new(Dtype::F64, vec![pca.input_dim, pca.output_dim], comp_bytes)
+                    .map_err(|e| {
+                        ClusterError::SnapshotFormat(format!("pca_components tensor: {e}"))
+                    })?;
             tensors.insert("pca_components".to_string(), comp_view);
 
             let mean_bytes = f64_slice_to_bytes(&pca.mean);
-            let mean_view =
-                TensorView::new(Dtype::F64, vec![pca.input_dim], mean_bytes)
-                    .map_err(|e| ClusterError::SnapshotFormat(format!("pca_mean tensor: {e}")))?;
+            let mean_view = TensorView::new(Dtype::F64, vec![pca.input_dim], mean_bytes)
+                .map_err(|e| ClusterError::SnapshotFormat(format!("pca_mean tensor: {e}")))?;
             tensors.insert("pca_mean".to_string(), mean_view);
 
             (Some(pca.input_dim), Some(pca.output_dim))
@@ -152,16 +146,16 @@ pub fn load_snapshot(dir: &str) -> Result<ClusterSnapshot, ClusterError> {
         "none" => Preprocessing::None,
         "l2_normalize" => Preprocessing::L2Normalize,
         "embedding_pipeline" => {
-            let pca_input_dim = metadata.pca_input_dim.ok_or_else(|| {
-                ClusterError::SnapshotFormat("missing pca_input_dim".to_string())
-            })?;
+            let pca_input_dim = metadata
+                .pca_input_dim
+                .ok_or_else(|| ClusterError::SnapshotFormat("missing pca_input_dim".to_string()))?;
             let pca_output_dim = metadata.pca_output_dim.ok_or_else(|| {
                 ClusterError::SnapshotFormat("missing pca_output_dim".to_string())
             })?;
 
-            let comp_tensor = tensors
-                .tensor("pca_components")
-                .map_err(|e| ClusterError::SnapshotFormat(format!("missing pca_components: {e}")))?;
+            let comp_tensor = tensors.tensor("pca_components").map_err(|e| {
+                ClusterError::SnapshotFormat(format!("missing pca_components: {e}"))
+            })?;
             let components = bytes_to_f64_vec(comp_tensor.data());
 
             let mean_tensor = tensors
@@ -271,10 +265,7 @@ mod tests {
             k: 2,
             d: 2,
             input_dim: 4,
-            preprocessing: Preprocessing::EmbeddingPipeline {
-                input_dim: 4,
-                pca,
-            },
+            preprocessing: Preprocessing::EmbeddingPipeline { input_dim: 4, pca },
             fit_mean_distances: vec![0.9, 0.85],
             fit_cluster_sizes: vec![30, 30],
             fit_n_samples: 60,
