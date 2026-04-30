@@ -14,6 +14,7 @@
 pub mod flat;
 pub mod ids;
 pub mod kernel;
+pub mod persistence;
 pub mod similarity_graph;
 pub mod topk;
 

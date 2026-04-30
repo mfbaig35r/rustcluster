@@ -61,6 +61,28 @@ impl IndexFlatL2 {
             unique_pairs,
         )
     }
+
+    /// Persistence accessors (crate-private — used by `index::persistence`).
+    pub(crate) fn dim_internal(&self) -> usize {
+        self.dim
+    }
+    pub(crate) fn vectors_internal(&self) -> &Array2<f32> {
+        &self.vectors
+    }
+    pub(crate) fn ids_internal(&self) -> &IdMap {
+        &self.ids
+    }
+
+    /// Reconstruct from raw parts (used by `index::persistence::load_flat_l2`).
+    pub(crate) fn from_parts(dim: usize, vectors: Array2<f32>, ids: IdMap) -> Self {
+        let norms_sq = row_norms_sq(vectors.view());
+        Self {
+            dim,
+            vectors,
+            norms_sq,
+            ids,
+        }
+    }
 }
 
 impl VectorIndex for IndexFlatL2 {
@@ -175,6 +197,20 @@ impl IndexFlatIP {
     /// `unique_pairs = true` emits only `(i, j)` with `i < j`.
     pub fn similarity_graph(&self, threshold: f32, unique_pairs: bool) -> EdgeList {
         similarity_graph_ip(self.vectors.view(), &self.ids, threshold, unique_pairs)
+    }
+
+    pub(crate) fn dim_internal(&self) -> usize {
+        self.dim
+    }
+    pub(crate) fn vectors_internal(&self) -> &Array2<f32> {
+        &self.vectors
+    }
+    pub(crate) fn ids_internal(&self) -> &IdMap {
+        &self.ids
+    }
+
+    pub(crate) fn from_parts(dim: usize, vectors: Array2<f32>, ids: IdMap) -> Self {
+        Self { dim, vectors, ids }
     }
 }
 

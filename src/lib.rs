@@ -2496,6 +2496,7 @@ mod python_bindings {
 
     // ---- Vector index (flat) ----
 
+    use crate::index::persistence::{load_flat_ip, load_flat_l2, save_flat_ip, save_flat_l2};
     use crate::index::{
         IndexFlatIP as RustIndexFlatIP, IndexFlatL2 as RustIndexFlatL2, SearchOpts, VectorIndex,
     };
@@ -2640,6 +2641,19 @@ mod python_bindings {
             let edges = py.allow_threads(|| self.inner.similarity_graph(threshold, unique_pairs));
             edges_to_py(py, edges)
         }
+
+        fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+            py.allow_threads(|| save_flat_l2(&self.inner, path))
+                .map_err(Into::into)
+        }
+
+        #[staticmethod]
+        fn load(py: Python<'_>, path: &str) -> PyResult<Self> {
+            let inner = py
+                .allow_threads(|| load_flat_l2(path))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(Self { inner })
+        }
     }
 
     #[pyclass(name = "IndexFlatIP", module = "rustcluster._rustcluster")]
@@ -2751,6 +2765,19 @@ mod python_bindings {
         ) {
             let edges = py.allow_threads(|| self.inner.similarity_graph(threshold, unique_pairs));
             edges_to_py(py, edges)
+        }
+
+        fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+            py.allow_threads(|| save_flat_ip(&self.inner, path))
+                .map_err(Into::into)
+        }
+
+        #[staticmethod]
+        fn load(py: Python<'_>, path: &str) -> PyResult<Self> {
+            let inner = py
+                .allow_threads(|| load_flat_ip(path))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(Self { inner })
         }
     }
 
