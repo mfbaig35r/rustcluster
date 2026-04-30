@@ -13,6 +13,7 @@ use crate::error::ClusterError;
 
 use super::ids::IdMap;
 use super::kernel::{ip_batch, ip_to_l2_sq, row_norms_sq};
+use super::similarity_graph::{similarity_graph_ip, similarity_graph_l2, EdgeList};
 use super::topk::{topk, Direction};
 use super::{Metric, RangeResult, SearchOpts, SearchResult, VectorIndex};
 
@@ -44,6 +45,21 @@ impl IndexFlatL2 {
 
     pub fn ids(&self) -> &IdMap {
         &self.ids
+    }
+
+    /// Emit every pair `(i, j)` with `i != j` whose squared L2 distance is
+    /// `<= threshold`. Returns three parallel vectors `(src_id, dst_id, score)`.
+    ///
+    /// `unique_pairs = true` emits only `(i, j)` with `i < j` (one row per
+    /// undirected pair). Default emits both directions.
+    pub fn similarity_graph(&self, threshold: f32, unique_pairs: bool) -> EdgeList {
+        similarity_graph_l2(
+            self.vectors.view(),
+            &self.norms_sq,
+            &self.ids,
+            threshold,
+            unique_pairs,
+        )
     }
 }
 
@@ -150,6 +166,15 @@ impl IndexFlatIP {
 
     pub fn ids(&self) -> &IdMap {
         &self.ids
+    }
+
+    /// Emit every pair `(i, j)` with `i != j` whose inner product is
+    /// `>= threshold`. Returns three parallel vectors `(src_id, dst_id, score)`.
+    ///
+    /// For cosine similarity, ensure vectors were L2-normalized before `add`.
+    /// `unique_pairs = true` emits only `(i, j)` with `i < j`.
+    pub fn similarity_graph(&self, threshold: f32, unique_pairs: bool) -> EdgeList {
+        similarity_graph_ip(self.vectors.view(), &self.ids, threshold, unique_pairs)
     }
 }
 

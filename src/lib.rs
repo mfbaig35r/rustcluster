@@ -2515,6 +2515,21 @@ mod python_bindings {
         Ok(arr)
     }
 
+    fn edges_to_py<'py>(
+        py: Python<'py>,
+        edges: crate::index::EdgeList,
+    ) -> (
+        Bound<'py, PyArray1<u64>>,
+        Bound<'py, PyArray1<u64>>,
+        Bound<'py, PyArray1<f32>>,
+    ) {
+        (
+            PyArray1::from_vec(py, edges.src),
+            PyArray1::from_vec(py, edges.dst),
+            PyArray1::from_vec(py, edges.scores),
+        )
+    }
+
     #[pyclass(name = "IndexFlatL2", module = "rustcluster._rustcluster")]
     struct PyIndexFlatL2 {
         inner: RustIndexFlatL2,
@@ -2609,6 +2624,21 @@ mod python_bindings {
                 PyArray1::from_vec(py, res.distances),
                 PyArray1::from_vec(py, res.labels),
             ))
+        }
+
+        #[pyo3(signature = (threshold, unique_pairs=false))]
+        fn similarity_graph<'py>(
+            &self,
+            py: Python<'py>,
+            threshold: f32,
+            unique_pairs: bool,
+        ) -> (
+            Bound<'py, PyArray1<u64>>,
+            Bound<'py, PyArray1<u64>>,
+            Bound<'py, PyArray1<f32>>,
+        ) {
+            let edges = py.allow_threads(|| self.inner.similarity_graph(threshold, unique_pairs));
+            edges_to_py(py, edges)
         }
     }
 
@@ -2706,6 +2736,21 @@ mod python_bindings {
                 PyArray1::from_vec(py, res.distances),
                 PyArray1::from_vec(py, res.labels),
             ))
+        }
+
+        #[pyo3(signature = (threshold, unique_pairs=false))]
+        fn similarity_graph<'py>(
+            &self,
+            py: Python<'py>,
+            threshold: f32,
+            unique_pairs: bool,
+        ) -> (
+            Bound<'py, PyArray1<u64>>,
+            Bound<'py, PyArray1<u64>>,
+            Bound<'py, PyArray1<f32>>,
+        ) {
+            let edges = py.allow_threads(|| self.inner.similarity_graph(threshold, unique_pairs));
+            edges_to_py(py, edges)
         }
     }
 

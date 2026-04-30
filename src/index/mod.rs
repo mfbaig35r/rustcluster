@@ -14,10 +14,12 @@
 pub mod flat;
 pub mod ids;
 pub mod kernel;
+pub mod similarity_graph;
 pub mod topk;
 
 pub use flat::{IndexFlatIP, IndexFlatL2};
 pub use ids::IdMap;
+pub use similarity_graph::EdgeList;
 
 use ndarray::{Array2, ArrayView2};
 
