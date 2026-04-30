@@ -2,6 +2,7 @@ pub mod agglomerative;
 pub mod dbscan;
 pub mod distance;
 pub mod embedding;
+pub mod index;
 pub mod snapshot;
 pub mod snapshot_io;
 // dead_code: KdTree::build is superseded by build_v2, kept for reference
@@ -2493,6 +2494,293 @@ mod python_bindings {
         ))
     }
 
+    // ---- Vector index (flat) ----
+
+    use crate::index::persistence::{load_flat_ip, load_flat_l2, save_flat_ip, save_flat_l2};
+    use crate::index::{
+        IndexFlatIP as RustIndexFlatIP, IndexFlatL2 as RustIndexFlatL2, SearchOpts, VectorIndex,
+    };
+
+    fn extract_f32_2d<'py>(
+        x: &Bound<'py, pyo3::types::PyAny>,
+        name: &str,
+    ) -> PyResult<PyReadonlyArray2<'py, f32>> {
+        let arr = x.extract::<PyReadonlyArray2<'_, f32>>().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "{name} must be a 2D float32 NumPy array"
+            ))
+        })?;
+        if !arr.is_c_contiguous() {
+            return Err(ClusterError::NotContiguous.into());
+        }
+        Ok(arr)
+    }
+
+    fn edges_to_py<'py>(
+        py: Python<'py>,
+        edges: crate::index::EdgeList,
+    ) -> (
+        Bound<'py, PyArray1<u64>>,
+        Bound<'py, PyArray1<u64>>,
+        Bound<'py, PyArray1<f32>>,
+    ) {
+        (
+            PyArray1::from_vec(py, edges.src),
+            PyArray1::from_vec(py, edges.dst),
+            PyArray1::from_vec(py, edges.scores),
+        )
+    }
+
+    #[pyclass(name = "IndexFlatL2", module = "rustcluster._rustcluster")]
+    struct PyIndexFlatL2 {
+        inner: RustIndexFlatL2,
+    }
+
+    #[pymethods]
+    impl PyIndexFlatL2 {
+        #[new]
+        fn new(dim: usize) -> Self {
+            Self {
+                inner: RustIndexFlatL2::new(dim),
+            }
+        }
+
+        #[getter]
+        fn dim(&self) -> usize {
+            self.inner.dim()
+        }
+
+        #[getter]
+        fn ntotal(&self) -> usize {
+            self.inner.ntotal()
+        }
+
+        #[getter]
+        fn metric(&self) -> &'static str {
+            self.inner.metric().as_str()
+        }
+
+        fn add(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
+            let arr = extract_f32_2d(x, "vectors")?;
+            let view = arr.as_array();
+            py.allow_threads(|| self.inner.add(view))
+                .map_err(Into::into)
+        }
+
+        fn add_with_ids(
+            &mut self,
+            py: Python<'_>,
+            x: &Bound<'_, pyo3::types::PyAny>,
+            ids: PyReadonlyArray1<'_, u64>,
+        ) -> PyResult<()> {
+            let arr = extract_f32_2d(x, "vectors")?;
+            let view = arr.as_array();
+            let ids_slice = ids.as_slice().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("ids must be C-contiguous uint64")
+            })?;
+            py.allow_threads(|| self.inner.add_with_ids(view, ids_slice))
+                .map_err(Into::into)
+        }
+
+        #[pyo3(signature = (queries, k, exclude_self=false))]
+        fn search<'py>(
+            &self,
+            py: Python<'py>,
+            queries: &Bound<'_, pyo3::types::PyAny>,
+            k: usize,
+            exclude_self: bool,
+        ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<i64>>)> {
+            let arr = extract_f32_2d(queries, "queries")?;
+            let view = arr.as_array();
+            let opts = SearchOpts { exclude_self };
+            let res = py
+                .allow_threads(|| self.inner.search(view, k, opts))
+                .map_err(pyo3::PyErr::from)?;
+            Ok((
+                PyArray2::from_owned_array(py, res.distances),
+                PyArray2::from_owned_array(py, res.labels),
+            ))
+        }
+
+        #[pyo3(signature = (queries, threshold, exclude_self=false))]
+        fn range_search<'py>(
+            &self,
+            py: Python<'py>,
+            queries: &Bound<'_, pyo3::types::PyAny>,
+            threshold: f32,
+            exclude_self: bool,
+        ) -> PyResult<(
+            Bound<'py, PyArray1<i64>>,
+            Bound<'py, PyArray1<f32>>,
+            Bound<'py, PyArray1<i64>>,
+        )> {
+            let arr = extract_f32_2d(queries, "queries")?;
+            let view = arr.as_array();
+            let opts = SearchOpts { exclude_self };
+            let res = py
+                .allow_threads(|| self.inner.range_search(view, threshold, opts))
+                .map_err(pyo3::PyErr::from)?;
+            Ok((
+                PyArray1::from_vec(py, res.lims),
+                PyArray1::from_vec(py, res.distances),
+                PyArray1::from_vec(py, res.labels),
+            ))
+        }
+
+        #[pyo3(signature = (threshold, unique_pairs=false))]
+        fn similarity_graph<'py>(
+            &self,
+            py: Python<'py>,
+            threshold: f32,
+            unique_pairs: bool,
+        ) -> (
+            Bound<'py, PyArray1<u64>>,
+            Bound<'py, PyArray1<u64>>,
+            Bound<'py, PyArray1<f32>>,
+        ) {
+            let edges = py.allow_threads(|| self.inner.similarity_graph(threshold, unique_pairs));
+            edges_to_py(py, edges)
+        }
+
+        fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+            py.allow_threads(|| save_flat_l2(&self.inner, path))
+                .map_err(Into::into)
+        }
+
+        #[staticmethod]
+        fn load(py: Python<'_>, path: &str) -> PyResult<Self> {
+            let inner = py
+                .allow_threads(|| load_flat_l2(path))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(Self { inner })
+        }
+    }
+
+    #[pyclass(name = "IndexFlatIP", module = "rustcluster._rustcluster")]
+    struct PyIndexFlatIP {
+        inner: RustIndexFlatIP,
+    }
+
+    #[pymethods]
+    impl PyIndexFlatIP {
+        #[new]
+        fn new(dim: usize) -> Self {
+            Self {
+                inner: RustIndexFlatIP::new(dim),
+            }
+        }
+
+        #[getter]
+        fn dim(&self) -> usize {
+            self.inner.dim()
+        }
+
+        #[getter]
+        fn ntotal(&self) -> usize {
+            self.inner.ntotal()
+        }
+
+        #[getter]
+        fn metric(&self) -> &'static str {
+            self.inner.metric().as_str()
+        }
+
+        fn add(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
+            let arr = extract_f32_2d(x, "vectors")?;
+            let view = arr.as_array();
+            py.allow_threads(|| self.inner.add(view))
+                .map_err(Into::into)
+        }
+
+        fn add_with_ids(
+            &mut self,
+            py: Python<'_>,
+            x: &Bound<'_, pyo3::types::PyAny>,
+            ids: PyReadonlyArray1<'_, u64>,
+        ) -> PyResult<()> {
+            let arr = extract_f32_2d(x, "vectors")?;
+            let view = arr.as_array();
+            let ids_slice = ids.as_slice().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("ids must be C-contiguous uint64")
+            })?;
+            py.allow_threads(|| self.inner.add_with_ids(view, ids_slice))
+                .map_err(Into::into)
+        }
+
+        #[pyo3(signature = (queries, k, exclude_self=false))]
+        fn search<'py>(
+            &self,
+            py: Python<'py>,
+            queries: &Bound<'_, pyo3::types::PyAny>,
+            k: usize,
+            exclude_self: bool,
+        ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<i64>>)> {
+            let arr = extract_f32_2d(queries, "queries")?;
+            let view = arr.as_array();
+            let opts = SearchOpts { exclude_self };
+            let res = py
+                .allow_threads(|| self.inner.search(view, k, opts))
+                .map_err(pyo3::PyErr::from)?;
+            Ok((
+                PyArray2::from_owned_array(py, res.distances),
+                PyArray2::from_owned_array(py, res.labels),
+            ))
+        }
+
+        #[pyo3(signature = (queries, threshold, exclude_self=false))]
+        fn range_search<'py>(
+            &self,
+            py: Python<'py>,
+            queries: &Bound<'_, pyo3::types::PyAny>,
+            threshold: f32,
+            exclude_self: bool,
+        ) -> PyResult<(
+            Bound<'py, PyArray1<i64>>,
+            Bound<'py, PyArray1<f32>>,
+            Bound<'py, PyArray1<i64>>,
+        )> {
+            let arr = extract_f32_2d(queries, "queries")?;
+            let view = arr.as_array();
+            let opts = SearchOpts { exclude_self };
+            let res = py
+                .allow_threads(|| self.inner.range_search(view, threshold, opts))
+                .map_err(pyo3::PyErr::from)?;
+            Ok((
+                PyArray1::from_vec(py, res.lims),
+                PyArray1::from_vec(py, res.distances),
+                PyArray1::from_vec(py, res.labels),
+            ))
+        }
+
+        #[pyo3(signature = (threshold, unique_pairs=false))]
+        fn similarity_graph<'py>(
+            &self,
+            py: Python<'py>,
+            threshold: f32,
+            unique_pairs: bool,
+        ) -> (
+            Bound<'py, PyArray1<u64>>,
+            Bound<'py, PyArray1<u64>>,
+            Bound<'py, PyArray1<f32>>,
+        ) {
+            let edges = py.allow_threads(|| self.inner.similarity_graph(threshold, unique_pairs));
+            edges_to_py(py, edges)
+        }
+
+        fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+            py.allow_threads(|| save_flat_ip(&self.inner, path))
+                .map_err(Into::into)
+        }
+
+        #[staticmethod]
+        fn load(py: Python<'_>, path: &str) -> PyResult<Self> {
+            let inner = py
+                .allow_threads(|| load_flat_ip(path))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(Self { inner })
+        }
+    }
+
     #[pymodule]
     pub fn _rustcluster(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<KMeans>()?;
@@ -2505,6 +2793,8 @@ mod python_bindings {
         m.add_class::<PyClusterSnapshot>()?;
         m.add_class::<PyAssignmentResult>()?;
         m.add_class::<PyDriftReport>()?;
+        m.add_class::<PyIndexFlatL2>()?;
+        m.add_class::<PyIndexFlatIP>()?;
         m.add_function(wrap_pyfunction!(silhouette_score, m)?)?;
         m.add_function(wrap_pyfunction!(calinski_harabasz_score, m)?)?;
         m.add_function(wrap_pyfunction!(davies_bouldin_score, m)?)?;

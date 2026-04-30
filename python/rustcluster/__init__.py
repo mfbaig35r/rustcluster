@@ -11,6 +11,7 @@ from rustcluster._rustcluster import MiniBatchKMeans as _RustMiniBatchKMeans
 from rustcluster._rustcluster import Dbscan as _RustDbscan
 from rustcluster._rustcluster import Hdbscan as _RustHdbscan
 from rustcluster._rustcluster import AgglomerativeClustering as _RustAgglomerative
+from rustcluster._rustcluster import IndexFlatL2, IndexFlatIP
 from rustcluster._rustcluster import (
     silhouette_score as _silhouette_score,
     calinski_harabasz_score as _calinski_harabasz_score,
@@ -18,6 +19,7 @@ from rustcluster._rustcluster import (
 )
 
 from rustcluster.snapshot import ClusterSnapshot
+from rustcluster import index
 
 __all__ = [
     "KMeans",
@@ -26,6 +28,9 @@ __all__ = [
     "HDBSCAN",
     "AgglomerativeClustering",
     "ClusterSnapshot",
+    "IndexFlatL2",
+    "IndexFlatIP",
+    "index",
     "silhouette_score",
     "calinski_harabasz_score",
     "davies_bouldin_score",
