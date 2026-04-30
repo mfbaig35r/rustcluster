@@ -78,13 +78,28 @@ pub enum ClusterError {
 
     #[error("Algorithm '{0}' does not support cluster slotting")]
     SlottingNotSupported(String),
+
+    // ---- Index ----
+    #[error("Index id-mode conflict: {0}")]
+    IndexIdModeConflict(String),
+
+    #[error("Duplicate external id {0} in add_with_ids")]
+    IndexDuplicateId(u64),
+
+    #[error("Index is empty — call add() or add_with_ids() first")]
+    IndexEmpty,
+
+    #[error("k must be > 0, got {0}")]
+    InvalidK(usize),
 }
 
 #[cfg(feature = "python")]
 impl From<ClusterError> for pyo3::PyErr {
     fn from(err: ClusterError) -> pyo3::PyErr {
         match &err {
-            ClusterError::NotFitted | ClusterError::SlottingNotSupported(_) => {
+            ClusterError::NotFitted
+            | ClusterError::SlottingNotSupported(_)
+            | ClusterError::IndexEmpty => {
                 pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
             }
             ClusterError::SnapshotIo(_) => pyo3::exceptions::PyIOError::new_err(err.to_string()),
