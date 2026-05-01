@@ -130,12 +130,21 @@ pub fn similarity_graph_l2(
 }
 
 /// Inner-product similarity graph: emit pairs with score >= threshold.
+///
+/// When `RUSTCLUSTER_FUSED=1` (or `true`) is set in the environment,
+/// dispatches to `similarity_graph_ip_fused_spike` — the v1.2 Step 0b
+/// architectural test that processes sub-tile bands without
+/// materializing the full score matrix.
 pub fn similarity_graph_ip(
     data: ArrayView2<f32>,
     ids: &IdMap,
     threshold: f32,
     unique_pairs: bool,
 ) -> EdgeList {
+    if fused_spike_enabled() {
+        return similarity_graph_ip_fused_spike(data, ids, threshold, unique_pairs);
+    }
+
     let (n, d) = data.dim();
     if n < 2 {
         return EdgeList::default();
@@ -165,6 +174,103 @@ pub fn similarity_graph_ip(
                         emit(&mut local, ids, gi, gj, score, unique_pairs);
                     }
                 }
+            }
+            local
+        })
+        .collect();
+
+    concat_edges(chunks)
+}
+
+fn fused_spike_enabled() -> bool {
+    matches!(
+        std::env::var("RUSTCLUSTER_FUSED").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Sub-tile row band size for the Step 0b spike. Override with the
+/// `RUSTCLUSTER_FUSED_SUB` env var. Default 16 — small enough that the
+/// per-band score buffer fits L1 even at large tile widths.
+fn spike_sub_tile() -> usize {
+    if let Ok(v) = std::env::var("RUSTCLUSTER_FUSED_SUB") {
+        if let Ok(n) = v.parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    16
+}
+
+/// v1.2 Step 0b — fused-architecture spike for `similarity_graph_ip`.
+///
+/// Same outer tile structure as the production path, but inside each
+/// tile we process a band of `spike_sub_tile()` rows at a time. The
+/// per-band score buffer is `(sub_h × w) f32` — small enough to live
+/// in L1 — and is dropped before the next band runs. The full
+/// `(h × w)` score matrix is never materialized.
+///
+/// The inner microkernel is still faer matmul. This is deliberately
+/// the architectural-only test: if even faer-backed sub-tiling closes
+/// most of the FAISS gap at d=1536, the v1.2 microkernel work in
+/// Plan A is bonus, not load-bearing.
+pub fn similarity_graph_ip_fused_spike(
+    data: ArrayView2<f32>,
+    ids: &IdMap,
+    threshold: f32,
+    unique_pairs: bool,
+) -> EdgeList {
+    similarity_graph_ip_fused_spike_with(data, ids, threshold, unique_pairs, spike_sub_tile())
+}
+
+/// As `similarity_graph_ip_fused_spike`, with an explicit sub-tile size.
+/// Used by the Step 0b probe to sweep over sub-tile sizes without
+/// fiddling with env vars across runs.
+pub fn similarity_graph_ip_fused_spike_with(
+    data: ArrayView2<f32>,
+    ids: &IdMap,
+    threshold: f32,
+    unique_pairs: bool,
+    sub: usize,
+) -> EdgeList {
+    let (n, d) = data.dim();
+    if n < 2 {
+        return EdgeList::default();
+    }
+    let tile = pick_tile_size(d);
+    let pairs = upper_triangle_tile_pairs(n, tile);
+
+    let chunks: Vec<EdgeList> = pairs
+        .par_iter()
+        .map(|&(i0, j0)| {
+            let i1 = (i0 + tile).min(n);
+            let j1 = (j0 + tile).min(n);
+            let h = i1 - i0;
+            let w = j1 - j0;
+            let xj = data.slice(s![j0..j1, ..]);
+            let mut local = EdgeList::with_capacity(h * w / 32 + 8);
+
+            let mut sub_start = 0;
+            while sub_start < h {
+                let sub_end = (sub_start + sub).min(h);
+                let sub_h = sub_end - sub_start;
+                let xi_sub = data.slice(s![i0 + sub_start..i0 + sub_end, ..]);
+                let ip = ip_batch(xi_sub, xj, Par::Seq);
+
+                for sli in 0..sub_h {
+                    let li = sub_start + sli;
+                    let gi = i0 + li;
+                    let lj_start = if i0 == j0 { li + 1 } else { 0 };
+                    for lj in lj_start..w {
+                        let gj = j0 + lj;
+                        let score = ip[(sli, lj)];
+                        if score >= threshold {
+                            emit(&mut local, ids, gi, gj, score, unique_pairs);
+                        }
+                    }
+                }
+                sub_start += sub;
             }
             local
         })
