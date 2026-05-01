@@ -18,8 +18,17 @@ use rayon::prelude::*;
 
 /// Inner-product matrix `Q @ X^T`, shape `(nq, n)`.
 ///
-/// Uses faer GEMM for batch sizes ≥ 2; manual loop otherwise.
-pub fn ip_batch(queries: ArrayView2<f32>, data: ArrayView2<f32>) -> Array2<f32> {
+/// `par` selects the matmul parallelism strategy:
+/// - `Par::Rayon(...)` — distribute the GEMM across rayon threads. Use this
+///   when the caller itself is **not** already in a rayon context (e.g. the
+///   PyO3 entry points for `search` and `range_search`).
+/// - `Par::Seq` — single-threaded matmul. Use this when the caller IS already
+///   running under rayon (e.g. `similarity_graph`'s per-tile loop), to avoid
+///   nested-parallelism contention.
+///
+/// For `nq == 1` we hand-write a GEMV loop — faer's setup overhead does not
+/// pay back at that size.
+pub fn ip_batch(queries: ArrayView2<f32>, data: ArrayView2<f32>, par: Par) -> Array2<f32> {
     let (nq, dq) = queries.dim();
     let (n, dx) = data.dim();
     debug_assert_eq!(dq, dx, "dim mismatch in ip_batch");
@@ -37,6 +46,8 @@ pub fn ip_batch(queries: ArrayView2<f32>, data: ArrayView2<f32>) -> Array2<f32> 
         let mut out = Array2::<f32>::zeros((1, n));
         let row = out.row_mut(0);
         let row_slice = row.into_slice().unwrap();
+        // For nq=1 we ignore `par` and just use rayon if available — faer's
+        // matmul has fixed-cost overhead that beats us on small GEMV anyway.
         row_slice.par_iter_mut().enumerate().for_each(|(i, dst)| {
             let x = &data_slice[i * d..(i + 1) * d];
             let mut acc = 0.0f32;
@@ -64,7 +75,7 @@ pub fn ip_batch(queries: ArrayView2<f32>, data: ArrayView2<f32>) -> Array2<f32> 
             q_ref,
             x_ref.transpose(),
             1.0_f32,
-            Par::Seq,
+            par,
         );
     }
     Array2::from_shape_vec((nq, n), out_data).expect("size matches by construction")
