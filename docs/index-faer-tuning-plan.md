@@ -218,6 +218,53 @@ Profile (Phase 1)
                 fundamentally kernel quality. Wait for BLAS.
 ```
 
+## Phase 1 result (April 2026)
+
+Profiled via two custom harnesses (committed under `examples/`):
+
+- `cargo run --release --example profile_similarity_graph --no-default-features`
+  measures wall-clock time inside the `similarity_graph_ip` hot loop,
+  splitting into `gemm` (the `ip_batch` call), `emit` (threshold
+  filter + edge push), and `concat` (final merge of per-tile chunks).
+- `cargo run --release --example profile_ip_batch --no-default-features`
+  drills inside `ip_batch` itself, splitting alloc / wrap / matmul.
+
+**Result at n=20k, d=1536, tile=384, on Apple Silicon (M-series):**
+
+```
+similarity_graph_ip wall fraction:
+  gemm (ip_batch):  99%
+  emit:              1%
+  concat:            0%
+  remainder:         0%
+
+inside ip_batch (1431 reps):
+  matmul (faer):  99.9%   ← the SIMD kernel
+  alloc:            0.1%
+  wrap (MatRef):    0.0%
+  other:            0.0%
+```
+
+**Conclusion: ABANDON Phase 2 and Phase 3.**
+
+There is no measurable overhead to optimize. The d=1536 gap to FAISS
+is the SIMD microkernel itself — pure-Rust faer/`gemm` running 20-30%
+slower than hand-tuned BLAS on Apple AMX / Intel AVX-512 / OpenBLAS-
+optimized paths.
+
+Phase 2a (output buffer reuse) would save under 1%. Phase 2b (direct
+`gemm` calls) would save 0%. Phase 3 (pre-packing) is bounded by
+whatever fraction of faer's matmul is packing vs SIMD — even an
+optimistic 10% upper bound is below the 5% shelve criterion.
+
+**The only path to closing the d=1536 gap is the BLAS backend** (or
+SimSIMD-style hand-tuned distance kernels). Decision deferred to the
+result of `docs/blas-backend-research-prompt.md`.
+
+The profiling harnesses stay in `examples/` so we can re-verify on
+any future hardware (especially Linux x86_64 with AVX-512 — the
+balance might shift there).
+
 ## Why this plan over going straight to BLAS
 
 The BLAS-backend research will probably take a week to digest and
