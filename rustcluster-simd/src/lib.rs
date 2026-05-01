@@ -10,8 +10,11 @@
 
 mod batched_dot;
 mod dot;
+mod fused;
 mod l2;
+mod microkernel;
 
 pub use batched_dot::{batched_dot_tile, batched_dot_tile_scalar};
 pub use dot::{dot_f32, dot_f32_scalar};
+pub use fused::{fused_threshold_emit_tile_ip, fused_threshold_emit_tile_l2};
 pub use l2::{l2sq_f32, l2sq_f32_scalar};
