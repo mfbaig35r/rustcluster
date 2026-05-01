@@ -36,7 +36,9 @@ const RUNS: usize = 5;
 
 fn make_data() -> Array2<f32> {
     let mut rng = StdRng::seed_from_u64(1536);
-    let mut data: Vec<f32> = (0..N * D).map(|_| rng.gen_range(-1.0_f32..1.0_f32)).collect();
+    let mut data: Vec<f32> = (0..N * D)
+        .map(|_| rng.gen_range(-1.0_f32..1.0_f32))
+        .collect();
     for i in 0..N {
         let row = &mut data[i * D..(i + 1) * D];
         let norm = row.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-30);

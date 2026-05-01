@@ -21,7 +21,9 @@ const REPS: usize = 1431; // matches the tile-pair count for n=20k tile=384
 
 fn make(n: usize, d: usize, seed: u64) -> Array2<f32> {
     let mut rng = StdRng::seed_from_u64(seed);
-    let data: Vec<f32> = (0..n * d).map(|_| rng.gen_range(-1.0_f32..1.0_f32)).collect();
+    let data: Vec<f32> = (0..n * d)
+        .map(|_| rng.gen_range(-1.0_f32..1.0_f32))
+        .collect();
     Array2::from_shape_vec((n, d), data).unwrap()
 }
 
@@ -51,12 +53,18 @@ fn instrumented_ip_batch(
     let m0 = Instant::now();
     {
         let out_mut = MatMut::from_row_major_slice_mut(&mut out_data, nq, n);
-        matmul(out_mut, Accum::Replace, q_ref, x_ref.transpose(), 1.0_f32, par);
+        matmul(
+            out_mut,
+            Accum::Replace,
+            q_ref,
+            x_ref.transpose(),
+            1.0_f32,
+            par,
+        );
     }
     let matmul_ns = m0.elapsed().as_nanos();
 
-    let out =
-        Array2::from_shape_vec((nq, n), out_data).expect("size matches by construction");
+    let out = Array2::from_shape_vec((nq, n), out_data).expect("size matches by construction");
     (out, alloc_ns, wrap_ns, matmul_ns)
 }
 
@@ -87,10 +95,7 @@ fn main() {
     let total_wall = t0.elapsed().as_nanos();
 
     let inner_total = alloc_total + wrap_total + matmul_total;
-    println!(
-        "wall total:        {:>8.1} ms",
-        total_wall as f64 / 1e6
-    );
+    println!("wall total:        {:>8.1} ms", total_wall as f64 / 1e6);
     println!(
         "  alloc:           {:>8.1} ms  ({:>4.1}% of wall, {:>4.1}% of inner)",
         alloc_total as f64 / 1e6,
