@@ -9,6 +9,7 @@
 
 use faer::Par;
 use ndarray::{Array2, ArrayView2, Axis};
+use rayon::prelude::*;
 
 use crate::error::ClusterError;
 
@@ -381,14 +382,22 @@ fn materialize_topk(
     data: &Array2<f32>,
 ) -> SearchResult {
     let nq = scores.nrows();
+
+    // Each query is independent — partition + sort in parallel, then write
+    // the results into the output arrays in order.
+    let results: Vec<(Vec<f32>, Vec<i64>)> = (0..nq)
+        .into_par_iter()
+        .map(|i| {
+            let row = scores.row(i);
+            let row_slice = row.as_slice().expect("contiguous score row");
+            let skip = self_position(opts.exclude_self, queries.row(i), data);
+            topk(row_slice, k, direction, skip)
+        })
+        .collect();
+
     let mut distances = Array2::<f32>::from_elem((nq, k), direction.sentinel());
     let mut labels = Array2::<i64>::from_elem((nq, k), -1);
-
-    for i in 0..nq {
-        let row = scores.row(i);
-        let row_slice = row.as_slice().expect("contiguous score row");
-        let skip = self_position(opts.exclude_self, queries.row(i), data);
-        let (vals, positions) = topk(row_slice, k, direction, skip);
+    for (i, (vals, positions)) in results.into_iter().enumerate() {
         for (j, (v, p)) in vals.iter().zip(positions.iter()).enumerate() {
             distances[(i, j)] = *v;
             labels[(i, j)] = if *p < 0 {
@@ -412,29 +421,44 @@ fn materialize_range(
     data: &Array2<f32>,
 ) -> RangeResult {
     let nq = scores.nrows();
-    let mut lims = Vec::with_capacity(nq + 1);
-    let mut distances: Vec<f32> = Vec::new();
-    let mut labels: Vec<i64> = Vec::new();
-    lims.push(0i64);
 
-    for i in 0..nq {
-        let row = scores.row(i);
-        let skip = self_position(opts.exclude_self, queries.row(i), data);
-        for (pos, &score) in row.iter().enumerate() {
-            if let Some(s) = skip {
-                if pos == s {
-                    continue;
+    // Each query produces its own (distances, labels) chunk in parallel.
+    // `par_iter().collect()` preserves order, which is required for the
+    // CSR-shape `lims` array to come out right.
+    let chunks: Vec<(Vec<f32>, Vec<i64>)> = (0..nq)
+        .into_par_iter()
+        .map(|i| {
+            let row = scores.row(i);
+            let skip = self_position(opts.exclude_self, queries.row(i), data);
+            let mut local_d: Vec<f32> = Vec::new();
+            let mut local_l: Vec<i64> = Vec::new();
+            for (pos, &score) in row.iter().enumerate() {
+                if let Some(s) = skip {
+                    if pos == s {
+                        continue;
+                    }
+                }
+                let keep = match direction {
+                    Direction::Smallest => score <= threshold,
+                    Direction::Largest => score >= threshold,
+                };
+                if keep {
+                    local_d.push(score);
+                    local_l.push(ids.external(pos) as i64);
                 }
             }
-            let keep = match direction {
-                Direction::Smallest => score <= threshold,
-                Direction::Largest => score >= threshold,
-            };
-            if keep {
-                distances.push(score);
-                labels.push(ids.external(pos) as i64);
-            }
-        }
+            (local_d, local_l)
+        })
+        .collect();
+
+    let total: usize = chunks.iter().map(|(d, _)| d.len()).sum();
+    let mut lims: Vec<i64> = Vec::with_capacity(nq + 1);
+    let mut distances: Vec<f32> = Vec::with_capacity(total);
+    let mut labels: Vec<i64> = Vec::with_capacity(total);
+    lims.push(0i64);
+    for (d, l) in chunks {
+        distances.extend(d);
+        labels.extend(l);
         lims.push(distances.len() as i64);
     }
 
