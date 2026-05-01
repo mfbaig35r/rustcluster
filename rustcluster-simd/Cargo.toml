@@ -14,7 +14,9 @@ publish = false
 name = "rustcluster_simd"
 
 [dependencies]
-# Real deps land in milestone 2 (pulp = "0.22"). Empty for now —
-# milestone 1 only verifies the workspace structure builds.
+# Pinned to match faer 0.24's transitive dep so we don't pull two
+# pulp versions into the same build.
+pulp = "0.22"
 
 [dev-dependencies]
+proptest = "1"
