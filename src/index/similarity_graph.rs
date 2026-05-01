@@ -17,6 +17,7 @@
 //! Tile size is dim-aware (see `pick_tile_size`). Override with the
 //! `RUSTCLUSTER_TILE_SIZE` env var for benchmarking.
 
+use faer::Par;
 use ndarray::{s, ArrayView2};
 use rayon::prelude::*;
 
@@ -96,7 +97,7 @@ pub fn similarity_graph_l2(
             let j1 = (j0 + tile).min(n);
             let xi = data.slice(s![i0..i1, ..]);
             let xj = data.slice(s![j0..j1, ..]);
-            let ip = ip_batch(xi, xj);
+            let ip = ip_batch(xi, xj, Par::Seq);
             let h = i1 - i0;
             let w = j1 - j0;
             // Estimate at ~1 edge per 32 candidates — heuristic for capacity.
@@ -143,7 +144,7 @@ pub fn similarity_graph_ip(
             let j1 = (j0 + tile).min(n);
             let xi = data.slice(s![i0..i1, ..]);
             let xj = data.slice(s![j0..j1, ..]);
-            let ip = ip_batch(xi, xj);
+            let ip = ip_batch(xi, xj, Par::Seq);
             let h = i1 - i0;
             let w = j1 - j0;
             let mut local = EdgeList::with_capacity(h * w / 32 + 8);
