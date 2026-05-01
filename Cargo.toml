@@ -35,6 +35,10 @@ tempfile = "3"
 name = "kernels"
 harness = false
 
+[[bench]]
+name = "index"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"
