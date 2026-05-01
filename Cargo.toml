@@ -37,6 +37,10 @@ tempfile = "3"
 # Used by examples/probe_pulp_dot.rs (Step 0a of v1.2). Pinned to match
 # faer 0.24's transitive dep so we don't pull two pulp versions.
 pulp = "0.22"
+# Used by examples/probe_batched_dot.rs (milestone 4 of v1.2) — the
+# rustcluster crate proper doesn't depend on rustcluster-simd until
+# milestone 5 wires it into ip_batch.
+rustcluster-simd = { path = "rustcluster-simd" }
 
 [[bench]]
 name = "kernels"
