@@ -194,3 +194,23 @@ priority order:
    `similarity_graph` at d≥384. Highly architecture-specific.
 
 These don't need to be decided now — measure v1.1 first.
+
+## v1.1 status (April 2026)
+
+- M1, M2, M3 **shipped** in `feat/index-perf` (PR #2). search/range_search
+  closed from 16-25× off FAISS to 1.3-3.7× off; similarity_graph held its
+  2.3× lead at d=128.
+- Tile-size heuristic updated for `d ≥ 1025` from 64 → 384 based on a
+  bench sweep at d=1536 (~17% improvement, no new dependencies).
+  similarity_graph at d=1536 went from 0.66× → ~0.77× of FAISS.
+- The d=1536 gap that remains is faer-vs-BLAS kernel quality. Production
+  workloads at raw `text-embedding-3-small` (1536d) will be 20-30%
+  behind FAISS until either a fused kernel or BLAS backend lands.
+
+## Next: BLAS backend research
+
+Option 2 (optional BLAS backend, numpy-style per-platform bundling) is
+being researched separately — see `docs/blas-backend-research-prompt.md`.
+Decision criteria there: wheel-size budget, ABI clash with numpy's
+bundled OpenBLAS, manylinux compatibility, CI matrix complexity. Result
+will determine whether v1.2 ships BLAS or stays pure-Rust.

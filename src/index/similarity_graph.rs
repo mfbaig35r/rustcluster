@@ -59,6 +59,12 @@ impl EdgeList {
 
 /// Pick the cache-blocked tile size based on `dim`. Reads
 /// `RUSTCLUSTER_TILE_SIZE` env var as an override.
+///
+/// Numbers come from a sweep at each dim regime — the goal is enough work
+/// per tile that faer's GEMM amortizes its setup cost, while keeping the
+/// inner score buffer + input strips in cache. At very high `d` (≥1025)
+/// small tiles waste time on per-tile overhead; sweep showed `tile=384`
+/// outperforms `64` by ~17% at `d=1536`.
 pub fn pick_tile_size(dim: usize) -> usize {
     if let Ok(v) = std::env::var("RUSTCLUSTER_TILE_SIZE") {
         if let Ok(n) = v.parse::<usize>() {
@@ -71,7 +77,7 @@ pub fn pick_tile_size(dim: usize) -> usize {
         0..=64 => 256,
         65..=256 => 128,
         257..=1024 => 96,
-        _ => 64,
+        _ => 384,
     }
 }
 
@@ -292,7 +298,7 @@ mod tests {
         assert_eq!(pick_tile_size(16), 256);
         assert_eq!(pick_tile_size(128), 128);
         assert_eq!(pick_tile_size(512), 96);
-        assert_eq!(pick_tile_size(1536), 64);
+        assert_eq!(pick_tile_size(1536), 384);
     }
 
     #[test]
