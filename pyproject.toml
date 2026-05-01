@@ -21,3 +21,7 @@ features = ["python"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "perf: performance regression tests (slow; opt in with -m perf)",
+]
+addopts = "-m 'not perf'"
