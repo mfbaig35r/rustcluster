@@ -30,6 +30,9 @@ serde_json = "1"
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+# Used by examples/probe_pulp_dot.rs (Step 0a of v1.2). Pinned to match
+# faer 0.24's transitive dep so we don't pull two pulp versions.
+pulp = "0.22"
 
 [[bench]]
 name = "kernels"
