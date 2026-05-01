@@ -7,6 +7,7 @@
 //! `||q-x||² = ||q||² + ||x||² - 2 q·x` is a single fused pass over the
 //! score matrix.
 
+use faer::Par;
 use ndarray::{Array2, ArrayView2, Axis};
 
 use crate::error::ClusterError;
@@ -126,7 +127,7 @@ impl VectorIndex for IndexFlatL2 {
         opts: SearchOpts,
     ) -> Result<SearchResult, ClusterError> {
         validate_for_query(self.dim, &queries, k, self.ntotal())?;
-        let mut scores = ip_batch(queries, self.vectors.view());
+        let mut scores = ip_batch(queries, self.vectors.view(), Par::rayon(0));
         let q_norms = row_norms_sq(queries);
         ip_to_l2_sq(&mut scores, &q_norms, &self.norms_sq);
         Ok(materialize_topk(
@@ -147,7 +148,7 @@ impl VectorIndex for IndexFlatL2 {
         opts: SearchOpts,
     ) -> Result<RangeResult, ClusterError> {
         validate_for_query(self.dim, &queries, 1, self.ntotal())?;
-        let mut scores = ip_batch(queries, self.vectors.view());
+        let mut scores = ip_batch(queries, self.vectors.view(), Par::rayon(0));
         let q_norms = row_norms_sq(queries);
         ip_to_l2_sq(&mut scores, &q_norms, &self.norms_sq);
         Ok(materialize_range(
@@ -253,7 +254,7 @@ impl VectorIndex for IndexFlatIP {
         opts: SearchOpts,
     ) -> Result<SearchResult, ClusterError> {
         validate_for_query(self.dim, &queries, k, self.ntotal())?;
-        let scores = ip_batch(queries, self.vectors.view());
+        let scores = ip_batch(queries, self.vectors.view(), Par::rayon(0));
         Ok(materialize_topk(
             scores,
             k,
@@ -272,7 +273,7 @@ impl VectorIndex for IndexFlatIP {
         opts: SearchOpts,
     ) -> Result<RangeResult, ClusterError> {
         validate_for_query(self.dim, &queries, 1, self.ntotal())?;
-        let scores = ip_batch(queries, self.vectors.view());
+        let scores = ip_batch(queries, self.vectors.view(), Par::rayon(0));
         Ok(materialize_range(
             scores,
             threshold,
