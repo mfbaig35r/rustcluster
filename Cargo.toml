@@ -16,9 +16,6 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["python"]
 python = ["pyo3/extension-module", "dep:numpy"]
-# Reverts ip_batch to the v1.1 path (faer matmul + scalar GEMV).
-# Escape hatch for one release; remove once v1.2 is field-validated.
-faer-fallback = []
 
 [dependencies]
 pyo3 = { version = "0.23", optional = true }
@@ -33,9 +30,6 @@ faer = "0.24"
 safetensors = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# v1.2 SIMD kernels. Path-dep until v1.3 stabilizes the API and we
-# decide whether to publish to crates.io.
-rustcluster-simd = { path = "rustcluster-simd" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -43,6 +37,14 @@ tempfile = "3"
 # Used by examples/probe_pulp_dot.rs (Step 0a of v1.2). Pinned to match
 # faer 0.24's transitive dep so we don't pull two pulp versions.
 pulp = "0.22"
+# rustcluster-simd is a workspace member shipping the v1.2 SIMD kernels
+# (dot_f32, l2sq_f32, batched_dot_tile, fused_threshold_emit_*). The
+# rustcluster lib itself does NOT depend on it — faer's GEMM remains
+# the production hot path because the simd kernels haven't yet matched
+# faer's perf at all production shapes (see `examples/probe_search.rs`
+# and `docs/v1.2-execution-plan.md`). Used here as a dev-dep for
+# benchmarks and probes only.
+rustcluster-simd = { path = "rustcluster-simd" }
 
 [[bench]]
 name = "kernels"

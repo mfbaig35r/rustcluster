@@ -1,30 +1,33 @@
 //! Distance and inner-product kernels for flat indexes.
 //!
-//! Hot path is `ip_batch` (Q @ X^T). For batched queries it dispatches
-//! to `rustcluster_simd::batched_dot_tile` — a 4×4 register-blocked
-//! pure-Rust SIMD kernel that matches or beats faer at d=1536 on
-//! Apple Silicon (see `examples/probe_batched_dot.rs`). For single
-//! queries (`nq == 1`) it falls back to a parallel `dot_f32` per
-//! database vector — GEMM setup overhead doesn't pay off at GEMV
-//! scale.
+//! For batch search we lean on faer GEMM: `Q (nq×d) @ X^T (d×n) → S (nq×n)`,
+//! then convert to L2 via the trick `||q-x||² = ||q||² + ||x||² - 2 q·x`.
 //!
-//! With the `faer-fallback` feature enabled, `ip_batch` reverts to the
-//! v1.1 path (faer matmul + scalar GEMV). Kept for one release as an
-//! escape hatch; remove once v1.2 is field-validated.
+//! For single queries (`nq == 1`) we fall back to a manual GEMV loop —
+//! faer's setup overhead doesn't pay back at that size.
+//!
+//! Inputs and outputs are wrapped as faer `MatRef` / `MatMut` views over the
+//! ndarray storage — zero copy on the way in and out. This is the difference
+//! between losing 2x to FAISS at d=1536 and matching it.
 
-use faer::Par;
+use faer::linalg::matmul::matmul;
+use faer::mat::{MatMut, MatRef};
+use faer::{Accum, Par};
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 
 /// Inner-product matrix `Q @ X^T`, shape `(nq, n)`.
 ///
 /// `par` selects the matmul parallelism strategy:
-/// - `Par::Rayon(...)` — distribute work across rayon threads. Use this
+/// - `Par::Rayon(...)` — distribute the GEMM across rayon threads. Use this
 ///   when the caller itself is **not** already in a rayon context (e.g. the
 ///   PyO3 entry points for `search` and `range_search`).
 /// - `Par::Seq` — single-threaded matmul. Use this when the caller IS already
 ///   running under rayon (e.g. `similarity_graph`'s per-tile loop), to avoid
 ///   nested-parallelism contention.
+///
+/// For `nq == 1` we hand-write a GEMV loop — faer's setup overhead does not
+/// pay back at that size.
 pub fn ip_batch(queries: ArrayView2<f32>, data: ArrayView2<f32>, par: Par) -> Array2<f32> {
     let (nq, dq) = queries.dim();
     let (n, dx) = data.dim();
@@ -36,46 +39,35 @@ pub fn ip_batch(queries: ArrayView2<f32>, data: ArrayView2<f32>, par: Par) -> Ar
     }
 
     if nq == 1 {
-        return gemv_one_query(queries, data);
+        // GEMV-shaped: one query against many database vectors.
+        let q = queries.row(0);
+        let q_slice = q.as_slice().expect("contiguous query row");
+        let data_slice = data.as_slice().expect("contiguous data");
+        let mut out = Array2::<f32>::zeros((1, n));
+        let row = out.row_mut(0);
+        let row_slice = row.into_slice().unwrap();
+        // For nq=1 we ignore `par` and just use rayon if available — faer's
+        // matmul has fixed-cost overhead that beats us on small GEMV anyway.
+        row_slice.par_iter_mut().enumerate().for_each(|(i, dst)| {
+            let x = &data_slice[i * d..(i + 1) * d];
+            let mut acc = 0.0f32;
+            for k in 0..d {
+                acc += q_slice[k] * x[k];
+            }
+            *dst = acc;
+        });
+        return out;
     }
 
+    // Batched: zero-copy faer GEMM. Wrap ndarray storage as MatRef / MatMut,
+    // compute scores = Q · X^T directly into the output buffer.
     let q_slice = queries.as_slice().expect("contiguous queries");
     let x_slice = data.as_slice().expect("contiguous data");
+    let q_ref = MatRef::from_row_major_slice(q_slice, nq, d);
+    let x_ref = MatRef::from_row_major_slice(x_slice, n, d);
+
     let mut out_data: Vec<f32> = vec![0.0; nq * n];
-
-    #[cfg(not(feature = "faer-fallback"))]
     {
-        if matches!(par, Par::Seq) {
-            rustcluster_simd::batched_dot_tile(q_slice, nq, x_slice, n, d, &mut out_data);
-        } else {
-            // Par::Rayon — parallelize over chunks of query rows. Chunk
-            // size tuned for batched_dot_tile's cache blocking: each
-            // worker gets enough rows to amortize the per-call setup
-            // and benefit from x-cache-block reuse across its q rows.
-            // Override with RUSTCLUSTER_Q_CHUNK for tuning.
-            let q_chunk_size = q_chunk_size();
-            out_data
-                .par_chunks_mut(q_chunk_size * n)
-                .enumerate()
-                .for_each(|(chunk_idx, out_chunk)| {
-                    let q_start = chunk_idx * q_chunk_size;
-                    let q_chunk_h = out_chunk.len() / n;
-                    let q_chunk = &q_slice[q_start * d..(q_start + q_chunk_h) * d];
-                    rustcluster_simd::batched_dot_tile(
-                        q_chunk, q_chunk_h, x_slice, n, d, out_chunk,
-                    );
-                });
-        }
-    }
-
-    #[cfg(feature = "faer-fallback")]
-    {
-        use faer::linalg::matmul::matmul;
-        use faer::mat::{MatMut, MatRef};
-        use faer::Accum;
-
-        let q_ref = MatRef::from_row_major_slice(q_slice, nq, d);
-        let x_ref = MatRef::from_row_major_slice(x_slice, n, d);
         let out_mut = MatMut::from_row_major_slice_mut(&mut out_data, nq, n);
         matmul(
             out_mut,
@@ -86,58 +78,7 @@ pub fn ip_batch(queries: ArrayView2<f32>, data: ArrayView2<f32>, par: Par) -> Ar
             par,
         );
     }
-
     Array2::from_shape_vec((nq, n), out_data).expect("size matches by construction")
-}
-
-#[cfg(not(feature = "faer-fallback"))]
-fn q_chunk_size() -> usize {
-    if let Ok(v) = std::env::var("RUSTCLUSTER_Q_CHUNK") {
-        if let Ok(n) = v.parse::<usize>() {
-            if n > 0 {
-                return n;
-            }
-        }
-    }
-    32
-}
-
-#[cfg(not(feature = "faer-fallback"))]
-fn gemv_one_query(queries: ArrayView2<f32>, data: ArrayView2<f32>) -> Array2<f32> {
-    let (_, d) = queries.dim();
-    let (n, _) = data.dim();
-    let q = queries.row(0);
-    let q_slice = q.as_slice().expect("contiguous query row");
-    let data_slice = data.as_slice().expect("contiguous data");
-    let mut out = Array2::<f32>::zeros((1, n));
-    let row = out.row_mut(0);
-    let row_slice = row.into_slice().unwrap();
-    row_slice.par_iter_mut().enumerate().for_each(|(i, dst)| {
-        let x = &data_slice[i * d..(i + 1) * d];
-        *dst = rustcluster_simd::dot_f32(q_slice, x);
-    });
-    out
-}
-
-#[cfg(feature = "faer-fallback")]
-fn gemv_one_query(queries: ArrayView2<f32>, data: ArrayView2<f32>) -> Array2<f32> {
-    let (_, d) = queries.dim();
-    let (n, _) = data.dim();
-    let q = queries.row(0);
-    let q_slice = q.as_slice().expect("contiguous query row");
-    let data_slice = data.as_slice().expect("contiguous data");
-    let mut out = Array2::<f32>::zeros((1, n));
-    let row = out.row_mut(0);
-    let row_slice = row.into_slice().unwrap();
-    row_slice.par_iter_mut().enumerate().for_each(|(i, dst)| {
-        let x = &data_slice[i * d..(i + 1) * d];
-        let mut acc = 0.0f32;
-        for k in 0..d {
-            acc += q_slice[k] * x[k];
-        }
-        *dst = acc;
-    });
-    out
 }
 
 /// Convert an inner-product matrix to squared-L2 distances in place.

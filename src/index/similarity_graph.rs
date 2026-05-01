@@ -5,24 +5,23 @@
 //! - L2: emit when `||x_i - x_j||² <= t`
 //! - IP: emit when `x_i · x_j >= t`
 //!
-//! v1.2 architecture: per-tile work goes through
-//! `rustcluster_simd::fused_threshold_emit_tile_*`, which computes
-//! 4×4 sub-tiles in registers and threshold-emits without
-//! materializing the (h × w) score tile. The full v1.1 path
-//! (ip_batch + scan) is preserved behind the `faer-fallback`
-//! feature for one release.
+//! Performance comes from three things vs `range_search` in a loop:
+//!  1. Cache-blocked tiles via faer GEMM — no full `n²` materialization.
+//!  2. Upper-triangle iteration — half the compute when query == database.
+//!  3. Per-tile output buffers, merged once at the end — no contention.
+//!
+//! Memory: with a loose threshold the edge list is O(n²); the caller picks
+//! the threshold and is responsible for managing memory. A streaming
+//! variant lands in v2.
 //!
 //! Tile size is dim-aware (see `pick_tile_size`). Override with the
 //! `RUSTCLUSTER_TILE_SIZE` env var for benchmarking.
 
+use faer::Par;
 use ndarray::{s, ArrayView2};
 use rayon::prelude::*;
 
-#[cfg(feature = "faer-fallback")]
-use faer::Par;
-
 use super::ids::IdMap;
-#[cfg(feature = "faer-fallback")]
 use super::kernel::ip_batch;
 
 /// Edge list result of a similarity-graph computation. All three vectors
@@ -61,9 +60,11 @@ impl EdgeList {
 /// Pick the cache-blocked tile size based on `dim`. Reads
 /// `RUSTCLUSTER_TILE_SIZE` env var as an override.
 ///
-/// Tile sizes were tuned for the v1.1 faer-based path. v1.2's fused
-/// kernel benefits from the same tile sizes — register blocking is at
-/// the 4×4 microkernel level, independent of outer tile shape.
+/// Numbers come from a sweep at each dim regime — the goal is enough work
+/// per tile that faer's GEMM amortizes its setup cost, while keeping the
+/// inner score buffer + input strips in cache. At very high `d` (≥1025)
+/// small tiles waste time on per-tile overhead; sweep showed `tile=384`
+/// outperforms `64` by ~17% at `d=1536`.
 pub fn pick_tile_size(dim: usize) -> usize {
     if let Ok(v) = std::env::var("RUSTCLUSTER_TILE_SIZE") {
         if let Ok(n) = v.parse::<usize>() {
@@ -100,51 +101,28 @@ pub fn similarity_graph_l2(
         .map(|&(i0, j0)| {
             let i1 = (i0 + tile).min(n);
             let j1 = (j0 + tile).min(n);
+            let xi = data.slice(s![i0..i1, ..]);
+            let xj = data.slice(s![j0..j1, ..]);
+            let ip = ip_batch(xi, xj, Par::Seq);
             let h = i1 - i0;
             let w = j1 - j0;
+            // Estimate at ~1 edge per 32 candidates — heuristic for capacity.
+            let mut local = EdgeList::with_capacity(h * w / 32 + 8);
 
-            // Estimate ~1 edge per 32 candidates — heuristic for capacity.
-            let mut local_edges: Vec<(u32, u32, f32)> =
-                Vec::with_capacity(h * w / 32 + 8);
-
-            #[cfg(not(feature = "faer-fallback"))]
-            {
-                let xi_view = data.slice(s![i0..i1, ..]);
-                let xj_view = data.slice(s![j0..j1, ..]);
-                let xi = xi_view.as_slice().expect("contiguous");
-                let xj = xj_view.as_slice().expect("contiguous");
-                rustcluster_simd::fused_threshold_emit_tile_l2(
-                    xi, h, &norms_sq[i0..i1],
-                    xj, w, &norms_sq[j0..j1],
-                    d,
-                    i0 as u32, j0 as u32,
-                    threshold,
-                    i0 == j0,
-                    &mut local_edges,
-                );
-            }
-
-            #[cfg(feature = "faer-fallback")]
-            {
-                let xi_view = data.slice(s![i0..i1, ..]);
-                let xj_view = data.slice(s![j0..j1, ..]);
-                let ip = ip_batch(xi_view, xj_view, Par::Seq);
-                for li in 0..h {
-                    let gi = i0 + li;
-                    let qn = norms_sq[gi];
-                    let lj_start = if i0 == j0 { li + 1 } else { 0 };
-                    for lj in lj_start..w {
-                        let gj = j0 + lj;
-                        let raw = qn + norms_sq[gj] - 2.0 * ip[(li, lj)];
-                        let dist = if raw < 0.0 { 0.0 } else { raw };
-                        if dist <= threshold {
-                            local_edges.push((gi as u32, gj as u32, dist));
-                        }
+            for li in 0..h {
+                let gi = i0 + li;
+                let qn = norms_sq[gi];
+                let lj_start = if i0 == j0 { li + 1 } else { 0 };
+                for lj in lj_start..w {
+                    let gj = j0 + lj;
+                    let raw = qn + norms_sq[gj] - 2.0 * ip[(li, lj)];
+                    let dist = if raw < 0.0 { 0.0 } else { raw };
+                    if dist <= threshold {
+                        emit(&mut local, ids, gi, gj, dist, unique_pairs);
                     }
                 }
             }
-
-            edges_to_local(local_edges, ids, unique_pairs)
+            local
         })
         .collect();
 
@@ -170,48 +148,25 @@ pub fn similarity_graph_ip(
         .map(|&(i0, j0)| {
             let i1 = (i0 + tile).min(n);
             let j1 = (j0 + tile).min(n);
+            let xi = data.slice(s![i0..i1, ..]);
+            let xj = data.slice(s![j0..j1, ..]);
+            let ip = ip_batch(xi, xj, Par::Seq);
             let h = i1 - i0;
             let w = j1 - j0;
+            let mut local = EdgeList::with_capacity(h * w / 32 + 8);
 
-            let mut local_edges: Vec<(u32, u32, f32)> =
-                Vec::with_capacity(h * w / 32 + 8);
-
-            #[cfg(not(feature = "faer-fallback"))]
-            {
-                let xi_view = data.slice(s![i0..i1, ..]);
-                let xj_view = data.slice(s![j0..j1, ..]);
-                let xi = xi_view.as_slice().expect("contiguous");
-                let xj = xj_view.as_slice().expect("contiguous");
-                rustcluster_simd::fused_threshold_emit_tile_ip(
-                    xi, h,
-                    xj, w,
-                    d,
-                    i0 as u32, j0 as u32,
-                    threshold,
-                    i0 == j0,
-                    &mut local_edges,
-                );
-            }
-
-            #[cfg(feature = "faer-fallback")]
-            {
-                let xi_view = data.slice(s![i0..i1, ..]);
-                let xj_view = data.slice(s![j0..j1, ..]);
-                let ip = ip_batch(xi_view, xj_view, Par::Seq);
-                for li in 0..h {
-                    let gi = i0 + li;
-                    let lj_start = if i0 == j0 { li + 1 } else { 0 };
-                    for lj in lj_start..w {
-                        let gj = j0 + lj;
-                        let score = ip[(li, lj)];
-                        if score >= threshold {
-                            local_edges.push((gi as u32, gj as u32, score));
-                        }
+            for li in 0..h {
+                let gi = i0 + li;
+                let lj_start = if i0 == j0 { li + 1 } else { 0 };
+                for lj in lj_start..w {
+                    let gj = j0 + lj;
+                    let score = ip[(li, lj)];
+                    if score >= threshold {
+                        emit(&mut local, ids, gi, gj, score, unique_pairs);
                     }
                 }
             }
-
-            edges_to_local(local_edges, ids, unique_pairs)
+            local
         })
         .collect();
 
@@ -219,30 +174,17 @@ pub fn similarity_graph_ip(
 }
 
 #[inline]
-fn edges_to_local(
-    local_edges: Vec<(u32, u32, f32)>,
-    ids: &IdMap,
-    unique_pairs: bool,
-) -> EdgeList {
-    let cap = if unique_pairs {
-        local_edges.len()
-    } else {
-        local_edges.len() * 2
-    };
-    let mut local = EdgeList::with_capacity(cap);
-    for (gi, gj, score) in local_edges {
-        let id_i = ids.external(gi as usize);
-        let id_j = ids.external(gj as usize);
-        local.src.push(id_i);
-        local.dst.push(id_j);
-        local.scores.push(score);
-        if !unique_pairs {
-            local.src.push(id_j);
-            local.dst.push(id_i);
-            local.scores.push(score);
-        }
+fn emit(out: &mut EdgeList, ids: &IdMap, gi: usize, gj: usize, score: f32, unique_pairs: bool) {
+    let id_i = ids.external(gi);
+    let id_j = ids.external(gj);
+    out.src.push(id_i);
+    out.dst.push(id_j);
+    out.scores.push(score);
+    if !unique_pairs {
+        out.src.push(id_j);
+        out.dst.push(id_i);
+        out.scores.push(score);
     }
-    local
 }
 
 fn upper_triangle_tile_pairs(n: usize, tile: usize) -> Vec<(usize, usize)> {
@@ -371,6 +313,8 @@ mod tests {
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
             *v = (seed >> 8) as f32 / (u32::MAX >> 8) as f32 - 0.5;
         }
+        let norms: Vec<f32> = data.outer_iter().map(|r| r.dot(&r)).collect();
+        let _ = norms;
 
         let ids = make_ids_sequential(n);
         let g = similarity_graph_ip(data.view(), &ids, 0.0, true);
