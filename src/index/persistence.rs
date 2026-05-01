@@ -75,6 +75,187 @@ pub fn load_flat_ip(dir: &str) -> Result<IndexFlatIP, ClusterError> {
 }
 
 // ---------------------------------------------------------------------------
+// In-memory serialization (for pickle / copy support)
+// ---------------------------------------------------------------------------
+
+/// Serialize an `IndexFlatL2` to a single bytes blob suitable for pickle.
+pub fn serialize_flat_l2_to_bytes(idx: &IndexFlatL2) -> Result<Vec<u8>, ClusterError> {
+    serialize_flat_to_bytes(
+        "IndexFlatL2",
+        "l2",
+        idx.dim_internal(),
+        idx.vectors_internal(),
+        idx.ids_internal(),
+    )
+}
+
+/// Serialize an `IndexFlatIP` to a single bytes blob suitable for pickle.
+pub fn serialize_flat_ip_to_bytes(idx: &IndexFlatIP) -> Result<Vec<u8>, ClusterError> {
+    serialize_flat_to_bytes(
+        "IndexFlatIP",
+        "ip",
+        idx.dim_internal(),
+        idx.vectors_internal(),
+        idx.ids_internal(),
+    )
+}
+
+/// Reconstruct an `IndexFlatL2` from a bytes blob produced by
+/// `serialize_flat_l2_to_bytes`.
+pub fn deserialize_flat_l2_from_bytes(bytes: &[u8]) -> Result<IndexFlatL2, ClusterError> {
+    let (meta, vectors, ids) = deserialize_flat_from_bytes(bytes, "IndexFlatL2", "l2")?;
+    Ok(IndexFlatL2::from_parts(meta.dim, vectors, ids))
+}
+
+/// Reconstruct an `IndexFlatIP` from a bytes blob produced by
+/// `serialize_flat_ip_to_bytes`.
+pub fn deserialize_flat_ip_from_bytes(bytes: &[u8]) -> Result<IndexFlatIP, ClusterError> {
+    let (meta, vectors, ids) = deserialize_flat_from_bytes(bytes, "IndexFlatIP", "ip")?;
+    Ok(IndexFlatIP::from_parts(meta.dim, vectors, ids))
+}
+
+fn serialize_flat_to_bytes(
+    index_type: &str,
+    metric: &str,
+    dim: usize,
+    vectors: &Array2<f32>,
+    ids: &IdMap,
+) -> Result<Vec<u8>, ClusterError> {
+    let n = vectors.nrows();
+    let has_ids = matches!(ids, IdMap::Explicit { .. });
+
+    let metadata = IndexMetadata {
+        format_version: INDEX_FORMAT_VERSION,
+        index_type: index_type.to_string(),
+        metric: metric.to_string(),
+        dim,
+        ntotal: n,
+        has_ids,
+    };
+    let metadata_json = serde_json::to_string(&metadata)
+        .map_err(|e| ClusterError::SnapshotFormat(format!("serialize metadata: {e}")))?;
+
+    let mut tensors: HashMap<String, TensorView<'_>> = HashMap::new();
+    let vec_bytes = f32_slice_to_bytes(
+        vectors
+            .as_slice()
+            .expect("vectors must be C-contiguous (constructed via append/from_parts)"),
+    );
+    let vec_view = TensorView::new(Dtype::F32, vec![n, dim], vec_bytes)
+        .map_err(|e| ClusterError::SnapshotFormat(format!("vectors tensor: {e}")))?;
+    tensors.insert("vectors".to_string(), vec_view);
+
+    if let IdMap::Explicit { ids: id_vec, .. } = ids {
+        let id_bytes = u64_slice_to_bytes(id_vec);
+        let id_view = TensorView::new(Dtype::U64, vec![id_vec.len()], id_bytes)
+            .map_err(|e| ClusterError::SnapshotFormat(format!("ids tensor: {e}")))?;
+        tensors.insert("ids".to_string(), id_view);
+    }
+
+    let mut tensor_metadata: HashMap<String, String> = HashMap::new();
+    tensor_metadata.insert("rustcluster_index".to_string(), metadata_json);
+
+    safetensors::serialize(&tensors, &Some(tensor_metadata))
+        .map_err(|e| ClusterError::SnapshotIo(format!("serialize bytes: {e}")))
+}
+
+fn deserialize_flat_from_bytes(
+    bytes: &[u8],
+    expected_type: &str,
+    expected_metric: &str,
+) -> Result<(IndexMetadata, Array2<f32>, IdMap), ClusterError> {
+    // safetensors 0.5: SafeTensors keeps `metadata` private; the public
+    // accessor for the user metadata HashMap lives on the `Metadata` struct
+    // returned by `read_metadata`.
+    let (_, header) = SafeTensors::read_metadata(bytes)
+        .map_err(|e| ClusterError::SnapshotFormat(format!("read header: {e}")))?;
+    let metadata_str: &String = header
+        .metadata()
+        .as_ref()
+        .and_then(|m: &HashMap<String, String>| m.get("rustcluster_index"))
+        .ok_or_else(|| {
+            ClusterError::SnapshotFormat(
+                "missing rustcluster_index metadata in safetensors blob".to_string(),
+            )
+        })?;
+    let metadata: IndexMetadata = serde_json::from_str(metadata_str)
+        .map_err(|e| ClusterError::SnapshotFormat(format!("parse metadata: {e}")))?;
+
+    let tensors = SafeTensors::deserialize(bytes)
+        .map_err(|e| ClusterError::SnapshotFormat(format!("parse safetensors bytes: {e}")))?;
+
+    if metadata.format_version == 0 || metadata.format_version > INDEX_FORMAT_VERSION {
+        return Err(ClusterError::SnapshotFormat(format!(
+            "unsupported index format_version {}; this build supports up to {}",
+            metadata.format_version, INDEX_FORMAT_VERSION
+        )));
+    }
+    if metadata.index_type != expected_type {
+        return Err(ClusterError::SnapshotFormat(format!(
+            "index type mismatch: blob is {}, deserializer expects {}",
+            metadata.index_type, expected_type
+        )));
+    }
+    if metadata.metric != expected_metric {
+        return Err(ClusterError::SnapshotFormat(format!(
+            "metric mismatch: blob is {}, deserializer expects {}",
+            metadata.metric, expected_metric
+        )));
+    }
+
+    let vec_tensor = tensors
+        .tensor("vectors")
+        .map_err(|e| ClusterError::SnapshotFormat(format!("missing vectors tensor: {e}")))?;
+    if vec_tensor.dtype() != Dtype::F32 {
+        return Err(ClusterError::SnapshotFormat(format!(
+            "vectors dtype must be f32, got {:?}",
+            vec_tensor.dtype()
+        )));
+    }
+    let shape = vec_tensor.shape();
+    if shape.len() != 2 || shape[0] != metadata.ntotal || shape[1] != metadata.dim {
+        return Err(ClusterError::SnapshotFormat(format!(
+            "vectors shape {:?} does not match metadata ({}, {})",
+            shape, metadata.ntotal, metadata.dim
+        )));
+    }
+    let vec_data = bytes_to_f32_vec(vec_tensor.data());
+    let vectors = Array2::from_shape_vec((metadata.ntotal, metadata.dim), vec_data)
+        .map_err(|e| ClusterError::SnapshotFormat(format!("reshape vectors: {e}")))?;
+
+    let ids = if metadata.has_ids {
+        let id_tensor = tensors
+            .tensor("ids")
+            .map_err(|e| ClusterError::SnapshotFormat(format!("missing ids tensor: {e}")))?;
+        if id_tensor.dtype() != Dtype::U64 {
+            return Err(ClusterError::SnapshotFormat(format!(
+                "ids dtype must be u64, got {:?}",
+                id_tensor.dtype()
+            )));
+        }
+        let id_shape = id_tensor.shape();
+        if id_shape.len() != 1 || id_shape[0] != metadata.ntotal {
+            return Err(ClusterError::SnapshotFormat(format!(
+                "ids shape {:?} does not match ntotal {}",
+                id_shape, metadata.ntotal
+            )));
+        }
+        let id_vec = bytes_to_u64_vec(id_tensor.data());
+        let mut map = IdMap::new();
+        map.extend_explicit(&id_vec)?;
+        map
+    } else {
+        let mut map = IdMap::new();
+        if metadata.ntotal > 0 {
+            map.extend_sequential(metadata.ntotal)?;
+        }
+        map
+    };
+
+    Ok((metadata, vectors, ids))
+}
+
+// ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
 
@@ -314,6 +495,48 @@ mod tests {
 
         // Loading as L2 should fail.
         let err = load_flat_l2(path).unwrap_err();
+        assert!(err.to_string().contains("type mismatch"));
+    }
+
+    #[test]
+    fn bytes_roundtrip_ip_sequential() {
+        let data = arr2(&[[1.0f32, 0.0], [0.0, 1.0], [0.7071, 0.7071]]);
+        let mut idx = IndexFlatIP::new(2);
+        idx.add(data.view()).unwrap();
+
+        let bytes = serialize_flat_ip_to_bytes(&idx).unwrap();
+        let loaded = deserialize_flat_ip_from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.ntotal(), 3);
+
+        let q = arr2(&[[1.0f32, 0.0]]);
+        let r = loaded
+            .search(q.view(), 3, super::super::SearchOpts::default())
+            .unwrap();
+        assert_eq!(r.labels[(0, 0)], 0);
+    }
+
+    #[test]
+    fn bytes_roundtrip_l2_with_ids() {
+        let data = arr2(&[[1.0f32, 0.0], [0.0, 1.0]]);
+        let mut idx = IndexFlatL2::new(2);
+        idx.add_with_ids(data.view(), &[1234, 5678]).unwrap();
+
+        let bytes = serialize_flat_l2_to_bytes(&idx).unwrap();
+        let loaded = deserialize_flat_l2_from_bytes(&bytes).unwrap();
+
+        let q = arr2(&[[1.0f32, 0.0]]);
+        let r = loaded
+            .search(q.view(), 1, super::super::SearchOpts::default())
+            .unwrap();
+        assert_eq!(r.labels[(0, 0)], 1234);
+    }
+
+    #[test]
+    fn bytes_type_mismatch_errors() {
+        let mut idx = IndexFlatIP::new(2);
+        idx.add(arr2(&[[1.0f32, 0.0]]).view()).unwrap();
+        let bytes = serialize_flat_ip_to_bytes(&idx).unwrap();
+        let err = deserialize_flat_l2_from_bytes(&bytes).unwrap_err();
         assert!(err.to_string().contains("type mismatch"));
     }
 

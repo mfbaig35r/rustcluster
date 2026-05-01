@@ -1,5 +1,9 @@
 """Brute-force correctness tests for IndexFlatL2 / IndexFlatIP."""
 
+import copy
+import pickle
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -305,3 +309,140 @@ class TestSimilarityNotebookPattern:
         for (s, d), score in list(edges_by_pair.items()):
             assert (d, s) in edges_by_pair
             assert abs(edges_by_pair[(d, s)] - score) < 1e-4
+
+
+# ---------------------------------------------------------------------------
+# Python-library polish: __repr__, __len__, pickle, fluent add, Path support
+# ---------------------------------------------------------------------------
+
+class TestRepr:
+    def test_repr_empty(self):
+        assert repr(IndexFlatIP(dim=64)) == "IndexFlatIP(dim=64, ntotal=0)"
+        assert repr(IndexFlatL2(dim=64)) == "IndexFlatL2(dim=64, ntotal=0)"
+
+    def test_repr_after_add(self, small_data):
+        idx = IndexFlatL2(dim=8)
+        idx.add(small_data)
+        assert repr(idx) == f"IndexFlatL2(dim=8, ntotal={len(small_data)})"
+
+    def test_repr_with_external_ids(self):
+        idx = IndexFlatL2(dim=4)
+        idx.add_with_ids(
+            np.zeros((3, 4), dtype=np.float32),
+            np.array([10, 20, 30], dtype=np.uint64),
+        )
+        assert "has_ids=True" in repr(idx)
+
+
+class TestLen:
+    def test_len_empty(self):
+        assert len(IndexFlatIP(dim=4)) == 0
+
+    def test_len_after_add(self, small_data):
+        idx = IndexFlatL2(dim=8)
+        idx.add(small_data)
+        assert len(idx) == len(small_data)
+
+    def test_bool_empty_is_false(self):
+        assert not IndexFlatIP(dim=4)
+        idx = IndexFlatIP(dim=4)
+        idx.add(np.zeros((1, 4), dtype=np.float32))
+        assert idx
+
+
+class TestPickle:
+    def test_pickle_roundtrip_preserves_search(self, normalized_data):
+        idx = IndexFlatIP(dim=normalized_data.shape[1])
+        idx.add(normalized_data)
+        pre_d, pre_l = idx.search(normalized_data[:5], k=10)
+
+        roundtripped = pickle.loads(pickle.dumps(idx))
+        post_d, post_l = roundtripped.search(normalized_data[:5], k=10)
+
+        np.testing.assert_array_equal(pre_d, post_d)
+        np.testing.assert_array_equal(pre_l, post_l)
+
+    def test_pickle_preserves_external_ids(self):
+        ids = np.arange(1000, 1010, dtype=np.uint64)
+        idx = IndexFlatL2(dim=4)
+        idx.add_with_ids(np.zeros((10, 4), dtype=np.float32), ids)
+        roundtripped = pickle.loads(pickle.dumps(idx))
+        _, labels = roundtripped.search(np.zeros((1, 4), dtype=np.float32), k=1)
+        assert labels[0, 0] == 1000
+
+    def test_deepcopy_creates_independent_object(self, small_data):
+        idx = IndexFlatIP(dim=8)
+        idx.add(small_data)
+        clone = copy.deepcopy(idx)
+        assert clone is not idx
+        assert len(clone) == len(idx)
+        # Mutating the clone shouldn't touch the original.
+        clone.add(small_data[:5])
+        assert len(clone) == len(idx) + 5
+
+    def test_pickle_preserves_repr(self, small_data):
+        idx = IndexFlatIP(dim=8)
+        idx.add(small_data)
+        roundtripped = pickle.loads(pickle.dumps(idx))
+        assert repr(roundtripped) == repr(idx)
+
+
+class TestPathlibSupport:
+    def test_save_and_load_with_path(self, tmp_path):
+        idx = IndexFlatIP(dim=4)
+        idx.add(np.zeros((5, 4), dtype=np.float32))
+        path = tmp_path / "idx.rci"
+        idx.save(path)  # pathlib.Path, not str
+        loaded = IndexFlatIP.load(path)
+        assert len(loaded) == 5
+
+    def test_load_with_str_still_works(self, tmp_path):
+        idx = IndexFlatL2(dim=4)
+        idx.add(np.zeros((3, 4), dtype=np.float32))
+        path_str = str(tmp_path / "idx.rci")
+        idx.save(path_str)
+        loaded = IndexFlatL2.load(path_str)
+        assert len(loaded) == 3
+
+
+class TestFluent:
+    def test_add_returns_self(self):
+        idx = IndexFlatIP(dim=4)
+        result = idx.add(np.zeros((1, 4), dtype=np.float32))
+        assert result is idx
+
+    def test_add_with_ids_returns_self(self):
+        idx = IndexFlatL2(dim=4)
+        result = idx.add_with_ids(
+            np.zeros((1, 4), dtype=np.float32),
+            np.array([42], dtype=np.uint64),
+        )
+        assert result is idx
+
+    def test_construction_chained_with_add(self):
+        X = np.zeros((10, 4), dtype=np.float32)
+        idx = IndexFlatIP(dim=4).add(X)
+        assert len(idx) == 10
+
+
+class TestTypeStubs:
+    def test_pyi_and_typed_marker_present(self):
+        import rustcluster.index
+        pkg_dir = Path(rustcluster.index.__file__).parent
+        assert (pkg_dir / "index.pyi").exists()
+        assert (pkg_dir / "py.typed").exists()
+
+
+class TestDocstrings:
+    @pytest.mark.parametrize("method_name", [
+        "add", "add_with_ids", "search", "range_search",
+        "similarity_graph", "save", "load",
+    ])
+    def test_method_has_docstring(self, method_name):
+        method = getattr(IndexFlatIP, method_name)
+        assert method.__doc__ is not None
+        assert len(method.__doc__.strip()) > 20
+
+    def test_class_has_docstring(self):
+        assert IndexFlatIP.__doc__ is not None
+        assert IndexFlatL2.__doc__ is not None

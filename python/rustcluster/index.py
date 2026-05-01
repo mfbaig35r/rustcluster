@@ -65,6 +65,22 @@ Notes
 - ``similarity_graph`` allocates the full edge list. With a loose threshold
   and large ``n`` this is O(n²) — choose your threshold accordingly. A
   streaming variant lands in v2.
+
+Performance vs FAISS
+--------------------
+
+This module uses ``faer`` (pure-Rust SIMD GEMM) for matrix multiplications
+rather than a BLAS dependency. The tradeoff:
+
+- At ``d ≤ 384``: ``similarity_graph`` matches or beats the FAISS batched
+  ``range_search`` loop (2-3x faster at d=128 on Apple Silicon).
+- At ``d ≥ 1024`` (raw embedding dimensions like ``text-embedding-3-small``
+  at 1536): faer lags hand-tuned BLAS by ~20-30%. The pure-Rust wheel
+  trades raw GEMM speed for the "pip install just works" property — no
+  BLAS dependency, no per-platform wheel-distribution overhead.
+
+A BLAS-backed build that closes this gap is being scoped (see
+``docs/blas-backend-research-prompt.md``).
 """
 
 from rustcluster._rustcluster import IndexFlatL2, IndexFlatIP
