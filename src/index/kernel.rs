@@ -48,15 +48,17 @@ pub fn ip_batch(queries: ArrayView2<f32>, data: ArrayView2<f32>, par: Par) -> Ar
         if matches!(par, Par::Seq) {
             rustcluster_simd::batched_dot_tile(q_slice, nq, x_slice, n, d, &mut out_data);
         } else {
-            // Par::Rayon — parallelize over chunks of query rows. 32 rows
-            // per chunk gives ample work for batched_dot_tile's register
-            // blocking while keeping enough chunks for rayon load balance.
-            const Q_CHUNK: usize = 32;
+            // Par::Rayon — parallelize over chunks of query rows. Chunk
+            // size tuned for batched_dot_tile's cache blocking: each
+            // worker gets enough rows to amortize the per-call setup
+            // and benefit from x-cache-block reuse across its q rows.
+            // Override with RUSTCLUSTER_Q_CHUNK for tuning.
+            let q_chunk_size = q_chunk_size();
             out_data
-                .par_chunks_mut(Q_CHUNK * n)
+                .par_chunks_mut(q_chunk_size * n)
                 .enumerate()
                 .for_each(|(chunk_idx, out_chunk)| {
-                    let q_start = chunk_idx * Q_CHUNK;
+                    let q_start = chunk_idx * q_chunk_size;
                     let q_chunk_h = out_chunk.len() / n;
                     let q_chunk = &q_slice[q_start * d..(q_start + q_chunk_h) * d];
                     rustcluster_simd::batched_dot_tile(
@@ -86,6 +88,18 @@ pub fn ip_batch(queries: ArrayView2<f32>, data: ArrayView2<f32>, par: Par) -> Ar
     }
 
     Array2::from_shape_vec((nq, n), out_data).expect("size matches by construction")
+}
+
+#[cfg(not(feature = "faer-fallback"))]
+fn q_chunk_size() -> usize {
+    if let Ok(v) = std::env::var("RUSTCLUSTER_Q_CHUNK") {
+        if let Ok(n) = v.parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    32
 }
 
 #[cfg(not(feature = "faer-fallback"))]

@@ -5,18 +5,45 @@
 //! tile the larger problem and wrap parallelism (rayon) on the outside;
 //! this kernel itself is single-threaded.
 //!
-//! Implementation: 4×4 register-blocked microkernel. For each 4-row ×
-//! 4-col block of output, 16 SIMD accumulators are kept in registers
-//! across the d-inner-loop. Each k-step loads 4 q-vectors and 4
-//! x-vectors and issues 16 FMAs — half the load-to-FMA ratio of a
-//! row-by-row dot. Edge rows / cols (q_h or x_w not multiple of 4)
-//! fall back to `dot_f32` per output.
+//! Two-level blocking:
+//!  1. **Outer X-cache block** (`CACHE_X_BLOCK` rows of x, ~1.5 MB at
+//!     d=1536). Sized to fit per-core L2 alongside the Q chunk. Each
+//!     x-cache-block is loaded from DRAM once and reused across all Q
+//!     rows, keeping memory traffic O(q_h·d + x_w·d) instead of
+//!     O(q_h·x_w·d) which is what a naive (i, j) loop would force at
+//!     wide x_w.
+//!  2. **Inner 4×4 register block**. For each 4-row × 4-col block of
+//!     output, 16 SIMD accumulators are kept in registers across the
+//!     d-inner-loop. Each k-step loads 4 q-vectors and 4 x-vectors and
+//!     issues 16 FMAs — half the load-to-FMA ratio of a row-by-row dot.
+//!
+//! Edge rows / cols (q_h or x_w not multiple of 4) fall back to
+//! `dot_f32` per output.
 
 use crate::dot::dot_f32;
 use crate::microkernel::Tile4x4;
 
 const TILE_M: usize = 4;
 const TILE_N: usize = 4;
+
+/// Rows of x kept resident per outer cache block. Tuned empirically on
+/// Apple Silicon M-series at d=1536, n=20k, nq=1000: 64 rows × 1536 × 4
+/// = 384 KB beats both smaller (insufficient amortization) and larger
+/// blocks (L2 contention with other threads / TLB pressure). See
+/// `examples/probe_search.rs` and the M5 sweep in commit history.
+/// Override with `RUSTCLUSTER_SIMD_X_BLOCK`.
+const CACHE_X_BLOCK_DEFAULT: usize = 64;
+
+fn cache_x_block() -> usize {
+    if let Ok(v) = std::env::var("RUSTCLUSTER_SIMD_X_BLOCK") {
+        if let Ok(n) = v.parse::<usize>() {
+            if n >= 4 {
+                return n - (n % 4);
+            }
+        }
+    }
+    CACHE_X_BLOCK_DEFAULT
+}
 
 /// Scalar reference: `out[i, j] = sum_k q[i, k] * x[j, k]`.
 pub fn batched_dot_tile_scalar(
@@ -65,37 +92,45 @@ pub fn batched_dot_tile(
     let x_w_main = x_w - (x_w % TILE_N);
 
     let arch = pulp::Arch::new();
+    let cache_x = cache_x_block();
 
-    // Main 4×4 register-blocked path.
-    for i in (0..q_h_main).step_by(TILE_M) {
-        let q0 = &q[i * d..(i + 1) * d];
-        let q1 = &q[(i + 1) * d..(i + 2) * d];
-        let q2 = &q[(i + 2) * d..(i + 3) * d];
-        let q3 = &q[(i + 3) * d..(i + 4) * d];
-        for j in (0..x_w_main).step_by(TILE_N) {
-            let x0 = &x[j * d..(j + 1) * d];
-            let x1 = &x[(j + 1) * d..(j + 2) * d];
-            let x2 = &x[(j + 2) * d..(j + 3) * d];
-            let x3 = &x[(j + 3) * d..(j + 4) * d];
-            let block = arch.dispatch(Tile4x4 {
-                q0, q1, q2, q3, x0, x1, x2, x3,
-            });
-            out[i * x_w + j]           = block[0];
-            out[i * x_w + j + 1]       = block[1];
-            out[i * x_w + j + 2]       = block[2];
-            out[i * x_w + j + 3]       = block[3];
-            out[(i + 1) * x_w + j]     = block[4];
-            out[(i + 1) * x_w + j + 1] = block[5];
-            out[(i + 1) * x_w + j + 2] = block[6];
-            out[(i + 1) * x_w + j + 3] = block[7];
-            out[(i + 2) * x_w + j]     = block[8];
-            out[(i + 2) * x_w + j + 1] = block[9];
-            out[(i + 2) * x_w + j + 2] = block[10];
-            out[(i + 2) * x_w + j + 3] = block[11];
-            out[(i + 3) * x_w + j]     = block[12];
-            out[(i + 3) * x_w + j + 1] = block[13];
-            out[(i + 3) * x_w + j + 2] = block[14];
-            out[(i + 3) * x_w + j + 3] = block[15];
+    // Outer x-cache-block loop: a CACHE_X_BLOCK-row chunk of x is
+    // loaded from DRAM once and reused across all q rows in the inner
+    // loops below. Without this, naive (i, j) iteration causes x to be
+    // re-read q_h/4 times — disastrous when x_w is large (search shape).
+    for j_outer in (0..x_w_main).step_by(cache_x) {
+        let j_outer_end = (j_outer + cache_x).min(x_w_main);
+
+        for i in (0..q_h_main).step_by(TILE_M) {
+            let q0 = &q[i * d..(i + 1) * d];
+            let q1 = &q[(i + 1) * d..(i + 2) * d];
+            let q2 = &q[(i + 2) * d..(i + 3) * d];
+            let q3 = &q[(i + 3) * d..(i + 4) * d];
+            for j in (j_outer..j_outer_end).step_by(TILE_N) {
+                let x0 = &x[j * d..(j + 1) * d];
+                let x1 = &x[(j + 1) * d..(j + 2) * d];
+                let x2 = &x[(j + 2) * d..(j + 3) * d];
+                let x3 = &x[(j + 3) * d..(j + 4) * d];
+                let block = arch.dispatch(Tile4x4 {
+                    q0, q1, q2, q3, x0, x1, x2, x3,
+                });
+                out[i * x_w + j]           = block[0];
+                out[i * x_w + j + 1]       = block[1];
+                out[i * x_w + j + 2]       = block[2];
+                out[i * x_w + j + 3]       = block[3];
+                out[(i + 1) * x_w + j]     = block[4];
+                out[(i + 1) * x_w + j + 1] = block[5];
+                out[(i + 1) * x_w + j + 2] = block[6];
+                out[(i + 1) * x_w + j + 3] = block[7];
+                out[(i + 2) * x_w + j]     = block[8];
+                out[(i + 2) * x_w + j + 1] = block[9];
+                out[(i + 2) * x_w + j + 2] = block[10];
+                out[(i + 2) * x_w + j + 3] = block[11];
+                out[(i + 3) * x_w + j]     = block[12];
+                out[(i + 3) * x_w + j + 1] = block[13];
+                out[(i + 3) * x_w + j + 2] = block[14];
+                out[(i + 3) * x_w + j + 3] = block[15];
+            }
         }
     }
 
