@@ -1,3 +1,7 @@
+[workspace]
+members = ["rustcluster-simd"]
+# The root `rustcluster` package is an implicit member.
+
 [package]
 name = "rustcluster"
 version = "0.6.0"

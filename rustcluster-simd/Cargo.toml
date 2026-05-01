@@ -1,0 +1,20 @@
+[package]
+name = "rustcluster-simd"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust SIMD distance kernels for vector-search workloads"
+license = "MIT"
+
+# Not published to crates.io for v1.2. The fused threshold-emit kernel
+# signature is the most uncertain piece, and publishing prematurely
+# commits to semver. Reconsider after v1.2 has shipped one release cycle.
+publish = false
+
+[lib]
+name = "rustcluster_simd"
+
+[dependencies]
+# Real deps land in milestone 2 (pulp = "0.22"). Empty for now —
+# milestone 1 only verifies the workspace structure builds.
+
+[dev-dependencies]
