@@ -2496,10 +2496,15 @@ mod python_bindings {
 
     // ---- Vector index (flat) ----
 
-    use crate::index::persistence::{load_flat_ip, load_flat_l2, save_flat_ip, save_flat_l2};
+    use crate::index::ids::IdMap;
+    use crate::index::persistence::{
+        deserialize_flat_ip_from_bytes, deserialize_flat_l2_from_bytes, load_flat_ip, load_flat_l2,
+        save_flat_ip, save_flat_l2, serialize_flat_ip_to_bytes, serialize_flat_l2_to_bytes,
+    };
     use crate::index::{
         IndexFlatIP as RustIndexFlatIP, IndexFlatL2 as RustIndexFlatL2, SearchOpts, VectorIndex,
     };
+    use pyo3::types::PyBytes;
 
     fn extract_f32_2d<'py>(
         x: &Bound<'py, pyo3::types::PyAny>,
@@ -2531,6 +2536,17 @@ mod python_bindings {
         )
     }
 
+    /// Flat exact L2 (squared Euclidean) index over f32 vectors.
+    ///
+    /// Stores vectors uncompressed and computes exact distances on every
+    /// query — no approximation, no training step. Distances returned by
+    /// ``search`` and ``range_search`` are **squared** L2 (matches FAISS).
+    ///
+    /// For cosine similarity, L2-normalize vectors and use ``IndexFlatIP``
+    /// instead.
+    ///
+    /// See ``rustcluster.index`` module docstring for full API guide,
+    /// performance notes, and end-to-end examples.
     #[pyclass(name = "IndexFlatL2", module = "rustcluster._rustcluster")]
     struct PyIndexFlatL2 {
         inner: RustIndexFlatL2,
@@ -2538,6 +2554,16 @@ mod python_bindings {
 
     #[pymethods]
     impl PyIndexFlatL2 {
+        /// Construct an empty IndexFlatL2 of the given dimension.
+        ///
+        /// Distances are squared L2 (matches FAISS). Use ``IndexFlatIP``
+        /// for cosine similarity by L2-normalizing vectors first.
+        ///
+        /// Parameters
+        /// ----------
+        /// dim : int
+        ///     Number of features per vector. All ``add`` calls must
+        ///     supply vectors with this many features.
         #[new]
         fn new(dim: usize) -> Self {
             Self {
@@ -2545,43 +2571,127 @@ mod python_bindings {
             }
         }
 
+        /// Number of features per vector (set at construction).
         #[getter]
         fn dim(&self) -> usize {
             self.inner.dim()
         }
 
+        /// Number of vectors currently stored.
         #[getter]
         fn ntotal(&self) -> usize {
             self.inner.ntotal()
         }
 
+        /// Distance metric — ``"l2"`` for this class.
         #[getter]
         fn metric(&self) -> &'static str {
             self.inner.metric().as_str()
         }
 
-        fn add(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
-            let arr = extract_f32_2d(x, "vectors")?;
-            let view = arr.as_array();
-            py.allow_threads(|| self.inner.add(view))
-                .map_err(Into::into)
+        fn __repr__(&self) -> String {
+            let has_ids = matches!(self.inner.ids(), IdMap::Explicit { .. });
+            format!(
+                "IndexFlatL2(dim={}, ntotal={}{})",
+                self.inner.dim(),
+                self.inner.ntotal(),
+                if has_ids { ", has_ids=True" } else { "" }
+            )
         }
 
-        fn add_with_ids(
-            &mut self,
-            py: Python<'_>,
+        fn __len__(&self) -> usize {
+            self.inner.ntotal()
+        }
+
+        /// Append vectors to the index using sequential IDs ``ntotal..ntotal+n``.
+        ///
+        /// Errors if the index has previously been populated with explicit
+        /// IDs via ``add_with_ids``.
+        ///
+        /// Parameters
+        /// ----------
+        /// vectors : np.ndarray of shape (n, dim), dtype float32
+        ///     Vectors to append. Must be C-contiguous.
+        ///
+        /// Returns
+        /// -------
+        /// self
+        ///     For fluent chaining, e.g. ``IndexFlatIP(dim=128).add(X)``.
+        ///
+        /// Raises
+        /// ------
+        /// ValueError
+        ///     If ``vectors`` is not 2-D float32 contiguous, dim mismatches,
+        ///     or contains NaN/inf.
+        fn add<'py>(
+            mut slf: PyRefMut<'py, Self>,
+            py: Python<'py>,
+            x: &Bound<'_, pyo3::types::PyAny>,
+        ) -> PyResult<PyRefMut<'py, Self>> {
+            let arr = extract_f32_2d(x, "vectors")?;
+            let view = arr.as_array();
+            let inner = &mut slf.inner;
+            py.allow_threads(|| inner.add(view))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(slf)
+        }
+
+        /// Append vectors with explicit u64 external IDs.
+        ///
+        /// The given IDs are returned by ``search``/``range_search``/
+        /// ``similarity_graph`` instead of internal positions.
+        ///
+        /// Errors if the index was previously populated via ``add`` (sequential
+        /// IDs), if any ID is duplicated, or if ``len(ids) != vectors.shape[0]``.
+        ///
+        /// Parameters
+        /// ----------
+        /// vectors : np.ndarray of shape (n, dim), dtype float32
+        ///     Vectors to append. Must be C-contiguous.
+        /// ids : np.ndarray of shape (n,), dtype uint64
+        ///     External IDs for each vector. Must be unique within the index.
+        ///
+        /// Returns
+        /// -------
+        /// self
+        ///     For fluent chaining.
+        fn add_with_ids<'py>(
+            mut slf: PyRefMut<'py, Self>,
+            py: Python<'py>,
             x: &Bound<'_, pyo3::types::PyAny>,
             ids: PyReadonlyArray1<'_, u64>,
-        ) -> PyResult<()> {
+        ) -> PyResult<PyRefMut<'py, Self>> {
             let arr = extract_f32_2d(x, "vectors")?;
             let view = arr.as_array();
             let ids_slice = ids.as_slice().map_err(|_| {
                 pyo3::exceptions::PyValueError::new_err("ids must be C-contiguous uint64")
             })?;
-            py.allow_threads(|| self.inner.add_with_ids(view, ids_slice))
-                .map_err(Into::into)
+            let inner = &mut slf.inner;
+            py.allow_threads(|| inner.add_with_ids(view, ids_slice))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(slf)
         }
 
+        /// Top-k nearest neighbors for a batch of queries.
+        ///
+        /// Parameters
+        /// ----------
+        /// queries : np.ndarray of shape (nq, dim), dtype float32
+        /// k : int
+        ///     Number of neighbors per query.
+        /// exclude_self : bool, default False
+        ///     If True, queries that exactly match an indexed vector skip
+        ///     that vector in their results. Useful when the query batch
+        ///     is a slice of the indexed dataset.
+        ///
+        /// Returns
+        /// -------
+        /// distances : np.ndarray of shape (nq, k), dtype float32
+        ///     Sorted ascending for L2 (squared distance) or descending
+        ///     for IP. Padded with the direction sentinel (+inf for L2,
+        ///     -inf for IP) when ``k > ntotal``.
+        /// labels : np.ndarray of shape (nq, k), dtype int64
+        ///     External IDs of the top-k vectors. -1 in any padded slot.
         #[pyo3(signature = (queries, k, exclude_self=false))]
         fn search<'py>(
             &self,
@@ -2602,6 +2712,25 @@ mod python_bindings {
             ))
         }
 
+        /// All neighbors within a similarity threshold (CSR-shaped output).
+        ///
+        /// L2 indexes return everything with squared distance ``<= threshold``;
+        /// IP indexes return everything with score ``>= threshold``. Output
+        /// shape matches FAISS's ``range_search``.
+        ///
+        /// Parameters
+        /// ----------
+        /// queries : np.ndarray of shape (nq, dim), dtype float32
+        /// threshold : float
+        /// exclude_self : bool, default False
+        ///
+        /// Returns
+        /// -------
+        /// lims : np.ndarray of shape (nq + 1,), dtype int64
+        ///     Each query ``i``'s results live in ``distances[lims[i]:lims[i+1]]``.
+        /// distances : np.ndarray of shape (lims[-1],), dtype float32
+        /// labels : np.ndarray of shape (lims[-1],), dtype int64
+        ///     External IDs of the matched vectors.
         #[pyo3(signature = (queries, threshold, exclude_self=false))]
         fn range_search<'py>(
             &self,
@@ -2627,6 +2756,26 @@ mod python_bindings {
             ))
         }
 
+        /// Emit every pair of indexed vectors meeting the threshold.
+        ///
+        /// Returns three parallel arrays ``(src, dst, scores)`` — one row
+        /// per directed edge. Each undirected pair appears twice by default
+        /// (both directions); pass ``unique_pairs=True`` to emit only
+        /// ``(i, j)`` where ``i < j``.
+        ///
+        /// This is the production self-similarity workload — a fused
+        /// alternative to looping ``range_search``.
+        ///
+        /// Parameters
+        /// ----------
+        /// threshold : float
+        /// unique_pairs : bool, default False
+        ///
+        /// Returns
+        /// -------
+        /// src : np.ndarray of shape (n_edges,), dtype uint64
+        /// dst : np.ndarray of shape (n_edges,), dtype uint64
+        /// scores : np.ndarray of shape (n_edges,), dtype float32
         #[pyo3(signature = (threshold, unique_pairs=false))]
         fn similarity_graph<'py>(
             &self,
@@ -2642,20 +2791,80 @@ mod python_bindings {
             edges_to_py(py, edges)
         }
 
-        fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
-            py.allow_threads(|| save_flat_l2(&self.inner, path))
+        /// Save the index to a directory.
+        ///
+        /// Format: ``{path}/vectors.safetensors`` plus ``metadata.json``,
+        /// and ``ids.safetensors`` if external IDs were used. Compatible
+        /// with ``IndexFlatL2.load``; not compatible with FAISS's binary format.
+        ///
+        /// Parameters
+        /// ----------
+        /// path : str | os.PathLike
+        ///     Directory to write to. Created if it does not exist.
+        fn save(&self, py: Python<'_>, path: std::path::PathBuf) -> PyResult<()> {
+            let path_str = path.to_str().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("path must be valid UTF-8")
+            })?;
+            py.allow_threads(|| save_flat_l2(&self.inner, path_str))
                 .map_err(Into::into)
         }
 
+        /// Load an IndexFlatL2 from a directory written by ``save``.
+        ///
+        /// Errors if the on-disk index type doesn't match (e.g., trying to
+        /// load an IndexFlatIP file via ``IndexFlatL2.load``).
+        ///
+        /// Parameters
+        /// ----------
+        /// path : str | os.PathLike
+        ///
+        /// Returns
+        /// -------
+        /// IndexFlatL2
         #[staticmethod]
-        fn load(py: Python<'_>, path: &str) -> PyResult<Self> {
+        fn load(py: Python<'_>, path: std::path::PathBuf) -> PyResult<Self> {
+            let path_str = path.to_str().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("path must be valid UTF-8")
+            })?;
             let inner = py
-                .allow_threads(|| load_flat_l2(path))
+                .allow_threads(|| load_flat_l2(path_str))
                 .map_err(pyo3::PyErr::from)?;
             Ok(Self { inner })
         }
+
+        // ---- Pickle protocol ----
+
+        fn __getnewargs__(&self) -> (usize,) {
+            (self.inner.dim(),)
+        }
+
+        fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+            let bytes = py
+                .allow_threads(|| serialize_flat_l2_to_bytes(&self.inner))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(PyBytes::new(py, &bytes))
+        }
+
+        fn __setstate__(&mut self, py: Python<'_>, state: &Bound<'_, PyBytes>) -> PyResult<()> {
+            let bytes: Vec<u8> = state.as_bytes().to_vec();
+            let inner = py
+                .allow_threads(move || deserialize_flat_l2_from_bytes(&bytes))
+                .map_err(pyo3::PyErr::from)?;
+            self.inner = inner;
+            Ok(())
+        }
     }
 
+    /// Flat exact inner-product index over f32 vectors.
+    ///
+    /// Higher score = closer. Stores vectors uncompressed; no training.
+    ///
+    /// For cosine similarity, L2-normalize both database and query
+    /// vectors before ``add`` and ``search`` — inner product on
+    /// unit-norm vectors equals cosine similarity.
+    ///
+    /// See ``rustcluster.index`` module docstring for full API guide,
+    /// performance notes, and end-to-end examples.
     #[pyclass(name = "IndexFlatIP", module = "rustcluster._rustcluster")]
     struct PyIndexFlatIP {
         inner: RustIndexFlatIP,
@@ -2663,6 +2872,16 @@ mod python_bindings {
 
     #[pymethods]
     impl PyIndexFlatIP {
+        /// Construct an empty IndexFlatIP of the given dimension.
+        ///
+        /// Higher inner-product score = closer. For cosine similarity,
+        /// L2-normalize vectors before ``add`` and queries before ``search``.
+        ///
+        /// Parameters
+        /// ----------
+        /// dim : int
+        ///     Number of features per vector. All ``add`` calls must
+        ///     supply vectors with this many features.
         #[new]
         fn new(dim: usize) -> Self {
             Self {
@@ -2670,43 +2889,127 @@ mod python_bindings {
             }
         }
 
+        /// Number of features per vector (set at construction).
         #[getter]
         fn dim(&self) -> usize {
             self.inner.dim()
         }
 
+        /// Number of vectors currently stored.
         #[getter]
         fn ntotal(&self) -> usize {
             self.inner.ntotal()
         }
 
+        /// Distance metric — ``"ip"`` for this class.
         #[getter]
         fn metric(&self) -> &'static str {
             self.inner.metric().as_str()
         }
 
-        fn add(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
-            let arr = extract_f32_2d(x, "vectors")?;
-            let view = arr.as_array();
-            py.allow_threads(|| self.inner.add(view))
-                .map_err(Into::into)
+        fn __repr__(&self) -> String {
+            let has_ids = matches!(self.inner.ids(), IdMap::Explicit { .. });
+            format!(
+                "IndexFlatIP(dim={}, ntotal={}{})",
+                self.inner.dim(),
+                self.inner.ntotal(),
+                if has_ids { ", has_ids=True" } else { "" }
+            )
         }
 
-        fn add_with_ids(
-            &mut self,
-            py: Python<'_>,
+        fn __len__(&self) -> usize {
+            self.inner.ntotal()
+        }
+
+        /// Append vectors to the index using sequential IDs ``ntotal..ntotal+n``.
+        ///
+        /// Errors if the index has previously been populated with explicit
+        /// IDs via ``add_with_ids``.
+        ///
+        /// Parameters
+        /// ----------
+        /// vectors : np.ndarray of shape (n, dim), dtype float32
+        ///     Vectors to append. Must be C-contiguous.
+        ///
+        /// Returns
+        /// -------
+        /// self
+        ///     For fluent chaining, e.g. ``IndexFlatIP(dim=128).add(X)``.
+        ///
+        /// Raises
+        /// ------
+        /// ValueError
+        ///     If ``vectors`` is not 2-D float32 contiguous, dim mismatches,
+        ///     or contains NaN/inf.
+        fn add<'py>(
+            mut slf: PyRefMut<'py, Self>,
+            py: Python<'py>,
+            x: &Bound<'_, pyo3::types::PyAny>,
+        ) -> PyResult<PyRefMut<'py, Self>> {
+            let arr = extract_f32_2d(x, "vectors")?;
+            let view = arr.as_array();
+            let inner = &mut slf.inner;
+            py.allow_threads(|| inner.add(view))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(slf)
+        }
+
+        /// Append vectors with explicit u64 external IDs.
+        ///
+        /// The given IDs are returned by ``search``/``range_search``/
+        /// ``similarity_graph`` instead of internal positions.
+        ///
+        /// Errors if the index was previously populated via ``add`` (sequential
+        /// IDs), if any ID is duplicated, or if ``len(ids) != vectors.shape[0]``.
+        ///
+        /// Parameters
+        /// ----------
+        /// vectors : np.ndarray of shape (n, dim), dtype float32
+        ///     Vectors to append. Must be C-contiguous.
+        /// ids : np.ndarray of shape (n,), dtype uint64
+        ///     External IDs for each vector. Must be unique within the index.
+        ///
+        /// Returns
+        /// -------
+        /// self
+        ///     For fluent chaining.
+        fn add_with_ids<'py>(
+            mut slf: PyRefMut<'py, Self>,
+            py: Python<'py>,
             x: &Bound<'_, pyo3::types::PyAny>,
             ids: PyReadonlyArray1<'_, u64>,
-        ) -> PyResult<()> {
+        ) -> PyResult<PyRefMut<'py, Self>> {
             let arr = extract_f32_2d(x, "vectors")?;
             let view = arr.as_array();
             let ids_slice = ids.as_slice().map_err(|_| {
                 pyo3::exceptions::PyValueError::new_err("ids must be C-contiguous uint64")
             })?;
-            py.allow_threads(|| self.inner.add_with_ids(view, ids_slice))
-                .map_err(Into::into)
+            let inner = &mut slf.inner;
+            py.allow_threads(|| inner.add_with_ids(view, ids_slice))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(slf)
         }
 
+        /// Top-k nearest neighbors for a batch of queries.
+        ///
+        /// Parameters
+        /// ----------
+        /// queries : np.ndarray of shape (nq, dim), dtype float32
+        /// k : int
+        ///     Number of neighbors per query.
+        /// exclude_self : bool, default False
+        ///     If True, queries that exactly match an indexed vector skip
+        ///     that vector in their results. Useful when the query batch
+        ///     is a slice of the indexed dataset.
+        ///
+        /// Returns
+        /// -------
+        /// distances : np.ndarray of shape (nq, k), dtype float32
+        ///     Sorted ascending for L2 (squared distance) or descending
+        ///     for IP. Padded with the direction sentinel (+inf for L2,
+        ///     -inf for IP) when ``k > ntotal``.
+        /// labels : np.ndarray of shape (nq, k), dtype int64
+        ///     External IDs of the top-k vectors. -1 in any padded slot.
         #[pyo3(signature = (queries, k, exclude_self=false))]
         fn search<'py>(
             &self,
@@ -2727,6 +3030,25 @@ mod python_bindings {
             ))
         }
 
+        /// All neighbors within a similarity threshold (CSR-shaped output).
+        ///
+        /// L2 indexes return everything with squared distance ``<= threshold``;
+        /// IP indexes return everything with score ``>= threshold``. Output
+        /// shape matches FAISS's ``range_search``.
+        ///
+        /// Parameters
+        /// ----------
+        /// queries : np.ndarray of shape (nq, dim), dtype float32
+        /// threshold : float
+        /// exclude_self : bool, default False
+        ///
+        /// Returns
+        /// -------
+        /// lims : np.ndarray of shape (nq + 1,), dtype int64
+        ///     Each query ``i``'s results live in ``distances[lims[i]:lims[i+1]]``.
+        /// distances : np.ndarray of shape (lims[-1],), dtype float32
+        /// labels : np.ndarray of shape (lims[-1],), dtype int64
+        ///     External IDs of the matched vectors.
         #[pyo3(signature = (queries, threshold, exclude_self=false))]
         fn range_search<'py>(
             &self,
@@ -2752,6 +3074,26 @@ mod python_bindings {
             ))
         }
 
+        /// Emit every pair of indexed vectors meeting the threshold.
+        ///
+        /// Returns three parallel arrays ``(src, dst, scores)`` — one row
+        /// per directed edge. Each undirected pair appears twice by default
+        /// (both directions); pass ``unique_pairs=True`` to emit only
+        /// ``(i, j)`` where ``i < j``.
+        ///
+        /// This is the production self-similarity workload — a fused
+        /// alternative to looping ``range_search``.
+        ///
+        /// Parameters
+        /// ----------
+        /// threshold : float
+        /// unique_pairs : bool, default False
+        ///
+        /// Returns
+        /// -------
+        /// src : np.ndarray of shape (n_edges,), dtype uint64
+        /// dst : np.ndarray of shape (n_edges,), dtype uint64
+        /// scores : np.ndarray of shape (n_edges,), dtype float32
         #[pyo3(signature = (threshold, unique_pairs=false))]
         fn similarity_graph<'py>(
             &self,
@@ -2767,17 +3109,67 @@ mod python_bindings {
             edges_to_py(py, edges)
         }
 
-        fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
-            py.allow_threads(|| save_flat_ip(&self.inner, path))
+        /// Save the index to a directory.
+        ///
+        /// Format: ``{path}/vectors.safetensors`` plus ``metadata.json``,
+        /// and ``ids.safetensors`` if external IDs were used. Compatible
+        /// with ``IndexFlatIP.load``; not compatible with FAISS's binary format.
+        ///
+        /// Parameters
+        /// ----------
+        /// path : str | os.PathLike
+        ///     Directory to write to. Created if it does not exist.
+        fn save(&self, py: Python<'_>, path: std::path::PathBuf) -> PyResult<()> {
+            let path_str = path.to_str().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("path must be valid UTF-8")
+            })?;
+            py.allow_threads(|| save_flat_ip(&self.inner, path_str))
                 .map_err(Into::into)
         }
 
+        /// Load an IndexFlatIP from a directory written by ``save``.
+        ///
+        /// Errors if the on-disk index type doesn't match (e.g., trying to
+        /// load an IndexFlatL2 file via ``IndexFlatIP.load``).
+        ///
+        /// Parameters
+        /// ----------
+        /// path : str | os.PathLike
+        ///
+        /// Returns
+        /// -------
+        /// IndexFlatIP
         #[staticmethod]
-        fn load(py: Python<'_>, path: &str) -> PyResult<Self> {
+        fn load(py: Python<'_>, path: std::path::PathBuf) -> PyResult<Self> {
+            let path_str = path.to_str().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("path must be valid UTF-8")
+            })?;
             let inner = py
-                .allow_threads(|| load_flat_ip(path))
+                .allow_threads(|| load_flat_ip(path_str))
                 .map_err(pyo3::PyErr::from)?;
             Ok(Self { inner })
+        }
+
+        // ---- Pickle protocol ----
+
+        fn __getnewargs__(&self) -> (usize,) {
+            (self.inner.dim(),)
+        }
+
+        fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+            let bytes = py
+                .allow_threads(|| serialize_flat_ip_to_bytes(&self.inner))
+                .map_err(pyo3::PyErr::from)?;
+            Ok(PyBytes::new(py, &bytes))
+        }
+
+        fn __setstate__(&mut self, py: Python<'_>, state: &Bound<'_, PyBytes>) -> PyResult<()> {
+            let bytes: Vec<u8> = state.as_bytes().to_vec();
+            let inner = py
+                .allow_threads(move || deserialize_flat_ip_from_bytes(&bytes))
+                .map_err(pyo3::PyErr::from)?;
+            self.inner = inner;
+            Ok(())
         }
     }
 

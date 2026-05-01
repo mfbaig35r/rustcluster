@@ -36,7 +36,9 @@ const SIM_GRAPH_THRESHOLD: f32 = 0.5;
 
 fn make_data(n: usize, d: usize, seed: u64) -> Array2<f32> {
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut data: Vec<f32> = (0..n * d).map(|_| rng.gen_range(-1.0_f32..1.0_f32)).collect();
+    let mut data: Vec<f32> = (0..n * d)
+        .map(|_| rng.gen_range(-1.0_f32..1.0_f32))
+        .collect();
     // L2-normalize each row.
     for i in 0..n {
         let row = &mut data[i * d..(i + 1) * d];
@@ -63,9 +65,13 @@ fn bench_search_top10(c: &mut Criterion) {
         let queries = data.slice(ndarray::s![0..NQ, ..]).to_owned();
         let idx = build_index(data.view());
         let opts = SearchOpts::default();
-        group.bench_with_input(BenchmarkId::from_parameter(format!("n{}_d{}", n, d)), &n, |b, _| {
-            b.iter(|| idx.search(queries.view(), K, opts).unwrap());
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("n{}_d{}", n, d)),
+            &n,
+            |b, _| {
+                b.iter(|| idx.search(queries.view(), K, opts).unwrap());
+            },
+        );
     }
     group.finish();
 }
@@ -78,9 +84,16 @@ fn bench_range_search(c: &mut Criterion) {
         let queries = data.slice(ndarray::s![0..NQ, ..]).to_owned();
         let idx = build_index(data.view());
         let opts = SearchOpts::default();
-        group.bench_with_input(BenchmarkId::from_parameter(format!("n{}_d{}", n, d)), &n, |b, _| {
-            b.iter(|| idx.range_search(queries.view(), RANGE_THRESHOLD, opts).unwrap());
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("n{}_d{}", n, d)),
+            &n,
+            |b, _| {
+                b.iter(|| {
+                    idx.range_search(queries.view(), RANGE_THRESHOLD, opts)
+                        .unwrap()
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -93,12 +106,21 @@ fn bench_similarity_graph(c: &mut Criterion) {
     for &(n, d) in &[(10_000, 128), (50_000, 128), (50_000, 384), (20_000, 1536)] {
         let data = make_data(n, d, 44);
         let idx = build_index(data.view());
-        group.bench_with_input(BenchmarkId::from_parameter(format!("n{}_d{}", n, d)), &n, |b, _| {
-            b.iter(|| idx.similarity_graph(SIM_GRAPH_THRESHOLD, true));
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("n{}_d{}", n, d)),
+            &n,
+            |b, _| {
+                b.iter(|| idx.similarity_graph(SIM_GRAPH_THRESHOLD, true));
+            },
+        );
     }
     group.finish();
 }
 
-criterion_group!(benches, bench_search_top10, bench_range_search, bench_similarity_graph);
+criterion_group!(
+    benches,
+    bench_search_top10,
+    bench_range_search,
+    bench_similarity_graph
+);
 criterion_main!(benches);
