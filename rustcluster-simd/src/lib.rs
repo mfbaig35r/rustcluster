@@ -9,5 +9,7 @@
 //! the `pulp` crate for runtime SIMD dispatch (AVX2, AVX-512, NEON).
 
 mod dot;
+mod l2;
 
 pub use dot::{dot_f32, dot_f32_scalar};
+pub use l2::{l2sq_f32, l2sq_f32_scalar};
