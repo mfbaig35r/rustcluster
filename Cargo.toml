@@ -16,6 +16,9 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["python"]
 python = ["pyo3/extension-module", "dep:numpy"]
+# Reverts ip_batch to the v1.1 path (faer matmul + scalar GEMV).
+# Escape hatch for one release; remove once v1.2 is field-validated.
+faer-fallback = []
 
 [dependencies]
 pyo3 = { version = "0.23", optional = true }
@@ -30,6 +33,9 @@ faer = "0.24"
 safetensors = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# v1.2 SIMD kernels. Path-dep until v1.3 stabilizes the API and we
+# decide whether to publish to crates.io.
+rustcluster-simd = { path = "rustcluster-simd" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -37,10 +43,6 @@ tempfile = "3"
 # Used by examples/probe_pulp_dot.rs (Step 0a of v1.2). Pinned to match
 # faer 0.24's transitive dep so we don't pull two pulp versions.
 pulp = "0.22"
-# Used by examples/probe_batched_dot.rs (milestone 4 of v1.2) — the
-# rustcluster crate proper doesn't depend on rustcluster-simd until
-# milestone 5 wires it into ip_batch.
-rustcluster-simd = { path = "rustcluster-simd" }
 
 [[bench]]
 name = "kernels"
