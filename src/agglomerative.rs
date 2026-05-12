@@ -4,6 +4,11 @@
 //! Supports Ward, complete, average, and single linkage.
 //!
 //! Complexity: O(n^2 log n) with priority queue.
+//!
+//! Memory: the pairwise distance matrix is stored condensed (upper triangle,
+//! n*(n-1)/2 entries) in the input dtype F. A priority queue of all initial
+//! pairs (O(n^2)) drives merge selection; a future NN-chain rewrite (Müllner
+//! 2011) will replace it with O(n) extra memory.
 
 use ndarray::{Array2, ArrayView2};
 use std::cmp::Reverse;
@@ -14,6 +19,19 @@ use crate::distance::{
 };
 use crate::error::ClusterError;
 use crate::utils::validate_data_generic;
+
+/// Index into a condensed upper-triangular distance matrix for the pair (i, j), i != j.
+///
+/// The condensed layout stores n*(n-1)/2 entries enumerated as
+/// (0,1), (0,2), ..., (0,n-1), (1,2), ..., (n-2,n-1) — matching scipy's
+/// `scipy.spatial.distance.pdist` ordering.
+#[inline(always)]
+fn cd_idx(i: usize, j: usize, n: usize) -> usize {
+    debug_assert!(i != j);
+    debug_assert!(i < n && j < n);
+    let (i, j) = if i < j { (i, j) } else { (j, i) };
+    i * n - i * (i + 1) / 2 + (j - i - 1)
+}
 
 /// Result of a fitted agglomerative model.
 pub struct AgglomerativeState<F: Scalar> {
@@ -112,22 +130,24 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
 
     let data_slice = data.as_slice().expect("data must be C-contiguous");
 
-    // Compute initial pairwise distance matrix (condensed, upper triangle)
+    // Pairwise distance matrix in condensed upper-triangular form
+    // (n*(n-1)/2 entries), stored in the input dtype F.
+    //
     // For Ward, store squared Euclidean; for others, store the metric distance.
-    let mut dist_matrix = vec![0.0f64; n * n];
+    // The f64 round trip preserves sqrt() precision when F = f32.
+    let cm_len = n.checked_mul(n - 1).expect("n*(n-1) overflow in dist matrix size") / 2;
+    let mut dist_matrix: Vec<F> = vec![F::zero(); cm_len];
     for i in 0..n {
         let pi = &data_slice[i * d..(i + 1) * d];
         for j in (i + 1)..n {
             let pj = &data_slice[j * d..(j + 1) * d];
             let raw = D::distance(pi, pj).to_f64_lossy();
-            // For Ward, keep squared Euclidean; for others, convert to metric
             let dist = if matches!(linkage, Linkage::Ward) {
-                raw // SquaredEuclidean is already squared
+                raw // SquaredEuclidean — Lance-Williams expects squared distances
             } else {
                 D::to_metric(raw)
             };
-            dist_matrix[i * n + j] = dist;
-            dist_matrix[j * n + i] = dist;
+            dist_matrix[cd_idx(i, j, n)] = F::from_f64_lossy(dist);
         }
     }
 
@@ -145,12 +165,19 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
     }
     let mut next_id = n;
 
-    // Priority queue: (distance, gen_i, gen_j, i, j) — skip stale entries by generation
+    // Priority queue: (distance, gen_i, gen_j, i, j) — skip stale entries by generation.
+    // Phase 2 (NN-chain) will replace this with O(n) extra memory.
     let mut generation = vec![0u32; n];
     let mut heap: BinaryHeap<Reverse<(FloatOrd, u32, u32, usize, usize)>> = BinaryHeap::new();
     for i in 0..n {
         for j in (i + 1)..n {
-            heap.push(Reverse((FloatOrd(dist_matrix[i * n + j]), 0, 0, i, j)));
+            heap.push(Reverse((
+                FloatOrd(dist_matrix[cd_idx(i, j, n)].to_f64_lossy()),
+                0,
+                0,
+                i,
+                j,
+            )));
         }
     }
 
@@ -185,13 +212,15 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
         membership[cj] = ci;
         let new_size = cluster_size[ci] + cluster_size[cj];
 
-        // Update distances from the merged cluster to all other active clusters
+        // Update distances from the merged cluster to all other active clusters.
+        // Lance-Williams arithmetic in f64 for numerical stability (matches the
+        // k-means centroid-accumulation convention); result cast back to F.
         for k in 0..n {
             if !active[k] || k == ci {
                 continue;
             }
-            let d_ci_k = dist_matrix[ci * n + k];
-            let d_cj_k = dist_matrix[cj * n + k];
+            let d_ci_k = dist_matrix[cd_idx(ci, k, n)].to_f64_lossy();
+            let d_cj_k = dist_matrix[cd_idx(cj, k, n)].to_f64_lossy();
             let n_i = cluster_size[ci] as f64;
             let n_j = cluster_size[cj] as f64;
             let n_k = cluster_size[k] as f64;
@@ -207,8 +236,7 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
                 Linkage::Average => (n_i * d_ci_k + n_j * d_cj_k) / (n_i + n_j),
             };
 
-            dist_matrix[ci * n + k] = new_dist;
-            dist_matrix[k * n + ci] = new_dist;
+            dist_matrix[cd_idx(ci, k, n)] = F::from_f64_lossy(new_dist);
 
             // Push updated distance with current generations
             heap.push(Reverse((
@@ -435,5 +463,68 @@ mod tests {
         let r2 = run_agglomerative_with_metric(&data.view(), 2, Linkage::Ward, Metric::Euclidean)
             .unwrap();
         assert_eq!(r1.labels, r2.labels);
+    }
+
+    #[test]
+    fn test_cd_idx_scipy_pdist_order() {
+        // scipy.spatial.distance.pdist enumerates pairs in row-major upper-triangle
+        // order: (0,1), (0,2), ..., (0,n-1), (1,2), ..., (n-2,n-1). The condensed
+        // index function must match this exactly so callers can interop with
+        // scipy's linkage matrix format in later phases.
+        let n = 5;
+        let mut idx = 0;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                assert_eq!(cd_idx(i, j, n), idx, "(i={i}, j={j})");
+                // Symmetric: same index regardless of argument order
+                assert_eq!(cd_idx(j, i, n), idx, "(j={j}, i={i}) symmetric");
+                idx += 1;
+            }
+        }
+        assert_eq!(idx, n * (n - 1) / 2);
+    }
+
+    #[test]
+    fn test_larger_n_average_cosine_f32() {
+        // Exercise the condensed matrix + f32 storage on a non-trivial n with
+        // cosine distance — the path that the supplier-clustering workload hits.
+        // Three well-separated clusters of 10 points each on the unit circle.
+        let n_per = 10;
+        let mut rows: Vec<[f32; 2]> = Vec::with_capacity(3 * n_per);
+        let centers = [(0.0f32, 1.0f32), (1.0, 0.0), (-0.7, -0.7)];
+        for (cx, cy) in centers {
+            for k in 0..n_per {
+                let jitter = (k as f32) * 1e-4;
+                rows.push([cx + jitter, cy - jitter]);
+            }
+        }
+        let data = ndarray::Array2::from_shape_vec((rows.len(), 2), rows.concat()).unwrap();
+        let result = run_agglomerative_with_metric_f32(
+            &data.view(),
+            3,
+            Linkage::Average,
+            Metric::Cosine,
+        )
+        .unwrap();
+        assert_eq!(result.n_clusters, 3);
+        // Each block of n_per consecutive rows should share a label
+        for block in 0..3 {
+            let base = result.labels[block * n_per];
+            for k in 1..n_per {
+                assert_eq!(
+                    result.labels[block * n_per + k],
+                    base,
+                    "block {block} row {k} mislabeled"
+                );
+            }
+        }
+        // Distances must be non-decreasing (reducibility property)
+        for w in result.distances.windows(2) {
+            assert!(
+                w[1] >= w[0] - 1e-5,
+                "non-monotonic merge distances: {:?}",
+                result.distances
+            );
+        }
     }
 }
