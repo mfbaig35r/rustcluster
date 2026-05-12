@@ -1,18 +1,17 @@
 //! Agglomerative (hierarchical) clustering.
 //!
-//! Builds a dendrogram bottom-up by merging the two nearest clusters at each step.
-//! Supports Ward, complete, average, and single linkage.
+//! Builds a dendrogram bottom-up by merging the two nearest clusters at each
+//! step using the nearest-neighbor chain algorithm (Müllner 2011, *Modern
+//! hierarchical, agglomerative clustering algorithms*, arXiv:1109.2378).
+//! Supports Ward, complete, average, and single linkage — all reducible
+//! linkages for which NN-chain produces the same dendrogram as the naive
+//! priority-queue algorithm.
 //!
-//! Complexity: O(n^2 log n) with priority queue.
-//!
-//! Memory: the pairwise distance matrix is stored condensed (upper triangle,
-//! n*(n-1)/2 entries) in the input dtype F. A priority queue of all initial
-//! pairs (O(n^2)) drives merge selection; a future NN-chain rewrite (Müllner
-//! 2011) will replace it with O(n) extra memory.
+//! Complexity: O(n^2) time, O(n^2 / 2) memory for the condensed pairwise
+//! distance matrix in the input dtype F, plus O(n) auxiliary state for the
+//! chain stack, active set, and cluster sizes. No priority queue.
 
 use ndarray::{Array2, ArrayView2};
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 
 use crate::distance::{
     CosineDistance, Distance, ManhattanDistance, Metric, Scalar, SquaredEuclidean,
@@ -128,6 +127,17 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
         });
     }
 
+    // Edge case: single point, no merges possible.
+    if n == 1 {
+        return Ok(AgglomerativeState {
+            labels: vec![0i64],
+            n_clusters: 1,
+            children: Vec::new(),
+            distances: Vec::new(),
+            _phantom: std::marker::PhantomData,
+        });
+    }
+
     let data_slice = data.as_slice().expect("data must be C-contiguous");
 
     // Pairwise distance matrix in condensed upper-triangular form
@@ -151,128 +161,182 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
         }
     }
 
-    // Cluster tracking
-    let mut cluster_size = vec![1usize; n];
-    let mut active = vec![true; n]; // which clusters are still active
-    let mut children: Vec<(usize, usize)> = Vec::with_capacity(n - 1);
-    let mut merge_distances: Vec<f64> = Vec::with_capacity(n - 1);
+    // ---- NN-chain phase: build the full dendrogram (n-1 merges) ----
+    //
+    // Each "slot" 0..n holds an active cluster. Merges always keep the lower-
+    // index slot and deactivate the higher one, so every cluster is reachable
+    // by a stable index in [0, n) without slot reallocation. The chain stack
+    // walks reciprocal-nearest-neighbor pairs (Müllner 2011, §3.2).
+    //
+    // Merges are produced in CHAIN ORDER, which is monotonic in distance
+    // WITHIN a single chain run but may jump when the chain empties and
+    // restarts on a different cluster. The next phase sorts by distance.
+    let mut size = vec![1usize; n];
+    let mut active = vec![true; n];
+    let mut chain: Vec<usize> = Vec::with_capacity(n);
+    let mut raw_merges: Vec<(usize, usize, f64)> = Vec::with_capacity(n - 1); // (lo, hi, dist)
 
-    // Label mapping: original cluster i -> current cluster id
-    // After merges, new clusters get IDs n, n+1, ...
-    let mut cluster_id = vec![0usize; n];
-    for i in 0..n {
-        cluster_id[i] = i;
-    }
-    let mut next_id = n;
-
-    // Priority queue: (distance, gen_i, gen_j, i, j) — skip stale entries by generation.
-    // Phase 2 (NN-chain) will replace this with O(n) extra memory.
-    let mut generation = vec![0u32; n];
-    let mut heap: BinaryHeap<Reverse<(FloatOrd, u32, u32, usize, usize)>> = BinaryHeap::new();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            heap.push(Reverse((
-                FloatOrd(dist_matrix[cd_idx(i, j, n)].to_f64_lossy()),
-                0,
-                0,
-                i,
-                j,
-            )));
+    for _ in 0..(n - 1) {
+        if chain.is_empty() {
+            let start = (0..n)
+                .find(|&i| active[i])
+                .expect("active clusters remain but none found");
+            chain.push(start);
         }
-    }
 
-    // Track which slot each point belongs to. When cj merges into ci,
-    // all points in cj now belong to ci.
-    let mut membership: Vec<usize> = (0..n).collect();
-
-    let n_merges_needed = n - target_n_clusters;
-
-    for _ in 0..n_merges_needed {
-        // Pop the minimum-distance pair that is active and current-generation
-        let (ci, cj, merge_dist) = loop {
-            let Reverse((FloatOrd(dist), gi, gj, i, j)) =
-                heap.pop().expect("heap empty before done");
-            if active[i] && active[j] && gi == generation[i] && gj == generation[j] {
-                break (i, j, dist);
-            }
-        };
-
-        // Record merge
-        children.push((cluster_id[ci], cluster_id[cj]));
-        let report_dist = if matches!(linkage, Linkage::Ward) {
-            merge_dist.sqrt() // report actual Euclidean distance
-        } else {
-            merge_dist
-        };
-        merge_distances.push(report_dist);
-
-        // Merge cj into ci
-        active[cj] = false;
-        // Forward cj's membership to ci
-        membership[cj] = ci;
-        let new_size = cluster_size[ci] + cluster_size[cj];
-
-        // Update distances from the merged cluster to all other active clusters.
-        // Lance-Williams arithmetic in f64 for numerical stability (matches the
-        // k-means centroid-accumulation convention); result cast back to F.
-        for k in 0..n {
-            if !active[k] || k == ci {
-                continue;
-            }
-            let d_ci_k = dist_matrix[cd_idx(ci, k, n)].to_f64_lossy();
-            let d_cj_k = dist_matrix[cd_idx(cj, k, n)].to_f64_lossy();
-            let n_i = cluster_size[ci] as f64;
-            let n_j = cluster_size[cj] as f64;
-            let n_k = cluster_size[k] as f64;
-
-            let new_dist = match linkage {
-                Linkage::Ward => {
-                    // Lance-Williams for Ward (on squared distances)
-                    let n_total = n_i + n_j + n_k;
-                    ((n_i + n_k) * d_ci_k + (n_j + n_k) * d_cj_k - n_k * merge_dist) / n_total
-                }
-                Linkage::Complete => d_ci_k.max(d_cj_k),
-                Linkage::Single => d_ci_k.min(d_cj_k),
-                Linkage::Average => (n_i * d_ci_k + n_j * d_cj_k) / (n_i + n_j),
+        // Extend the chain until we find a reciprocal nearest neighbor pair.
+        loop {
+            let a = *chain.last().unwrap();
+            let prev = if chain.len() >= 2 {
+                Some(chain[chain.len() - 2])
+            } else {
+                None
             };
 
-            dist_matrix[cd_idx(ci, k, n)] = F::from_f64_lossy(new_dist);
+            // Find nearest active cluster to a, with deterministic tie-breaking:
+            // (1) smallest distance wins; (2) on ties, smallest slot index wins;
+            // (3) on a tie with `prev` (the cluster that previously chose a),
+            //     prefer `prev` so an RNN pair closes instead of cycling
+            //     through tied neighbors. This is the standard NN-chain tie-
+            //     break rule from Müllner §3.2.
+            let mut best_k = usize::MAX;
+            let mut best_d = f64::INFINITY;
+            for k in 0..n {
+                if k == a || !active[k] {
+                    continue;
+                }
+                let dk = dist_matrix[cd_idx(a, k, n)].to_f64_lossy();
+                if dk < best_d || (dk == best_d && k < best_k) {
+                    best_d = dk;
+                    best_k = k;
+                }
+            }
+            if let Some(p) = prev {
+                if active[p] && p != a {
+                    let dp = dist_matrix[cd_idx(a, p, n)].to_f64_lossy();
+                    if dp <= best_d {
+                        best_d = dp;
+                        best_k = p;
+                    }
+                }
+            }
+            let b = best_k;
 
-            // Push updated distance with current generations
-            heap.push(Reverse((
-                FloatOrd(new_dist),
-                generation[ci] + 1,
-                generation[k],
-                ci,
-                k,
-            )));
+            // RNN closure: if `b` is the cluster that put `a` on the chain,
+            // we have a reciprocal nearest neighbor pair and can merge.
+            if Some(b) == prev {
+                chain.pop(); // a
+                chain.pop(); // b
+
+                // Lower index survives; deterministic and removes the slot-pick
+                // ambiguity the old priority-queue version inherited from heap
+                // pop order.
+                let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+                let merge_dist = best_d;
+                raw_merges.push((lo, hi, merge_dist));
+
+                // Lance-Williams update: d(merged, k) for all other active k.
+                // Arithmetic in f64 for numerical stability (matches k-means
+                // centroid-accumulation convention); result cast back to F.
+                let n_lo = size[lo] as f64;
+                let n_hi = size[hi] as f64;
+                for k in 0..n {
+                    if !active[k] || k == lo || k == hi {
+                        continue;
+                    }
+                    let d_lo_k = dist_matrix[cd_idx(lo, k, n)].to_f64_lossy();
+                    let d_hi_k = dist_matrix[cd_idx(hi, k, n)].to_f64_lossy();
+                    let n_k = size[k] as f64;
+
+                    let new_dist = match linkage {
+                        Linkage::Ward => {
+                            let n_total = n_lo + n_hi + n_k;
+                            ((n_lo + n_k) * d_lo_k + (n_hi + n_k) * d_hi_k
+                                - n_k * merge_dist)
+                                / n_total
+                        }
+                        Linkage::Complete => d_lo_k.max(d_hi_k),
+                        Linkage::Single => d_lo_k.min(d_hi_k),
+                        Linkage::Average => (n_lo * d_lo_k + n_hi * d_hi_k) / (n_lo + n_hi),
+                    };
+
+                    dist_matrix[cd_idx(lo, k, n)] = F::from_f64_lossy(new_dist);
+                }
+
+                active[hi] = false;
+                size[lo] += size[hi];
+                break; // back to the outer "n-1 merges" loop
+            }
+
+            chain.push(b);
         }
-
-        cluster_size[ci] = new_size;
-        cluster_id[ci] = next_id;
-        next_id += 1;
-        generation[ci] += 1; // increment so old entries for ci are skipped
     }
 
-    // Assign labels using the membership tracker built during merges.
-    // membership[i] = the active slot that point i currently belongs to.
+    // ---- Sort + cut phase: produce scipy-compatible output ----
+    //
+    // NN-chain's chain-order may not be distance-monotonic across chain
+    // restarts. Sorting (stable, so chain order breaks ties) gives the
+    // canonical scipy linkage matrix ordering. We then take the first
+    // (n - target_n_clusters) sorted merges for both labels and the
+    // children/distances output.
+    let mut order: Vec<usize> = (0..raw_merges.len()).collect();
+    order.sort_by(|&i, &j| {
+        raw_merges[i]
+            .2
+            .partial_cmp(&raw_merges[j].2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let n_to_apply = n - target_n_clusters;
+
+    // Union-find on slots for label assignment. Smaller-index becomes the
+    // root, mirroring the lo-survives convention used during NN-chain so
+    // that final cluster labels are deterministic and stable across reruns.
+    let mut parent: Vec<usize> = (0..n).collect();
+    for &ord_idx in &order[..n_to_apply] {
+        let (lo, hi, _) = raw_merges[ord_idx];
+        let rlo = uf_find(&mut parent, lo);
+        let rhi = uf_find(&mut parent, hi);
+        if rlo != rhi {
+            if rlo < rhi {
+                parent[rhi] = rlo;
+            } else {
+                parent[rlo] = rhi;
+            }
+        }
+    }
+
+    // Assign labels: walk slot indices in order, assign sequential ints to
+    // each distinct root.
     let mut slot_label: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
     let mut next_label = 0i64;
-    for i in 0..n {
-        if active[i] {
-            slot_label.insert(i, next_label);
-            next_label += 1;
-        }
-    }
-
     let mut labels = vec![0i64; n];
     for i in 0..n {
-        // Follow the membership chain to find the active slot
-        let mut slot = membership[i];
-        while !active[slot] {
-            slot = membership[slot];
-        }
-        labels[i] = *slot_label.get(&slot).unwrap();
+        let root = uf_find(&mut parent, i);
+        let lbl = *slot_label.entry(root).or_insert_with(|| {
+            let l = next_label;
+            next_label += 1;
+            l
+        });
+        labels[i] = lbl;
+    }
+
+    // Build scipy-format children + distances from the sorted merge prefix.
+    // cluster_id[slot] tracks the current cluster ID for each slot: initially
+    // its slot index (i.e. a leaf), updated to (n + j) when it survives a merge.
+    let mut cluster_id: Vec<usize> = (0..n).collect();
+    let mut children: Vec<(usize, usize)> = Vec::with_capacity(n_to_apply);
+    let mut merge_distances: Vec<f64> = Vec::with_capacity(n_to_apply);
+    for (j, &ord_idx) in order[..n_to_apply].iter().enumerate() {
+        let (lo, hi, dist) = raw_merges[ord_idx];
+        let report_dist = if matches!(linkage, Linkage::Ward) {
+            dist.sqrt() // report actual Euclidean distance for Ward
+        } else {
+            dist
+        };
+        children.push((cluster_id[lo], cluster_id[hi]));
+        merge_distances.push(report_dist);
+        cluster_id[lo] = n + j;
     }
 
     Ok(AgglomerativeState {
@@ -284,24 +348,15 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
     })
 }
 
-/// Wrapper for f64 to implement Ord for BinaryHeap.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct FloatOrd(f64);
-
-impl Eq for FloatOrd {}
-
-impl PartialOrd for FloatOrd {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+/// Path-compressing union-find lookup. Used to compute final cluster labels
+/// from the sorted merge prefix without rebuilding a membership chain.
+#[inline]
+fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]]; // halving — sufficient and branch-free
+        x = parent[x];
     }
-}
-
-impl Ord for FloatOrd {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }
+    x
 }
 
 #[cfg(test)]
