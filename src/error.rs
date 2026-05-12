@@ -66,6 +66,12 @@ pub enum ClusterError {
     #[error("Ward linkage requires euclidean metric")]
     WardRequiresEuclidean,
 
+    #[error("distance_threshold must be finite, got {0}")]
+    InvalidDistanceThreshold(f64),
+
+    #[error("Exactly one of n_clusters and distance_threshold must be set; the other must be None")]
+    AgglomerativeCutAmbiguous,
+
     // ---- Snapshot ----
     #[error("Snapshot I/O error: {0}")]
     SnapshotIo(String),

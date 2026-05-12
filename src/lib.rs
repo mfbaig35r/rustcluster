@@ -875,7 +875,7 @@ mod python_bindings {
 
     use crate::agglomerative::{
         run_agglomerative_with_metric, run_agglomerative_with_metric_f32, AgglomerativeState,
-        Linkage,
+        Cut, Linkage,
     };
 
     enum AgglomerativeFitted {
@@ -885,7 +885,8 @@ mod python_bindings {
 
     #[pyclass]
     struct AgglomerativeClustering {
-        n_clusters: usize,
+        n_clusters: Option<usize>,
+        distance_threshold: Option<f64>,
         linkage: Linkage,
         metric: Metric,
         fitted: Option<AgglomerativeFitted>,
@@ -894,10 +895,35 @@ mod python_bindings {
     #[pymethods]
     impl AgglomerativeClustering {
         #[new]
-        #[pyo3(signature = (n_clusters=2, linkage="ward", metric="euclidean"))]
-        fn new(n_clusters: usize, linkage: &str, metric: &str) -> PyResult<Self> {
-            if n_clusters == 0 {
-                return Err(ClusterError::InvalidClusters { k: 0, n: 0 }.into());
+        #[pyo3(signature = (
+            n_clusters = None,
+            linkage = "ward",
+            metric = "euclidean",
+            distance_threshold = None,
+        ))]
+        fn new(
+            n_clusters: Option<usize>,
+            linkage: &str,
+            metric: &str,
+            distance_threshold: Option<f64>,
+        ) -> PyResult<Self> {
+            // sklearn rule: exactly one of (n_clusters, distance_threshold).
+            // The Python wrapper passes the user-facing default n_clusters=2;
+            // at this layer both must be explicit Options.
+            match (n_clusters, distance_threshold) {
+                (Some(_), Some(_)) | (None, None) => {
+                    return Err(ClusterError::AgglomerativeCutAmbiguous.into());
+                }
+                (Some(k), None) => {
+                    if k == 0 {
+                        return Err(ClusterError::InvalidClusters { k: 0, n: 0 }.into());
+                    }
+                }
+                (None, Some(t)) => {
+                    if !t.is_finite() {
+                        return Err(ClusterError::InvalidDistanceThreshold(t).into());
+                    }
+                }
             }
             let link = Linkage::from_str(linkage)?;
             let met = Metric::from_str(metric)?;
@@ -906,6 +932,7 @@ mod python_bindings {
             }
             Ok(AgglomerativeClustering {
                 n_clusters,
+                distance_threshold,
                 linkage: link,
                 metric: met,
                 fitted: None,
@@ -913,7 +940,12 @@ mod python_bindings {
         }
 
         fn fit(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
-            let nc = self.n_clusters;
+            let cut = match (self.n_clusters, self.distance_threshold) {
+                (Some(k), None) => Cut::NClusters(k),
+                (None, Some(t)) => Cut::DistanceThreshold(t),
+                // Constructor enforces the invariant — these arms are unreachable.
+                _ => return Err(ClusterError::AgglomerativeCutAmbiguous.into()),
+            };
             let link = self.linkage;
             let metric = self.metric;
 
@@ -922,8 +954,8 @@ mod python_bindings {
                 py,
                 x,
                 AgglomerativeFitted,
-                |view| run_agglomerative_with_metric(&view, nc, link, metric),
-                |view| run_agglomerative_with_metric_f32(&view, nc, link, metric)
+                |view| run_agglomerative_with_metric(&view, cut, link, metric),
+                |view| run_agglomerative_with_metric_f32(&view, cut, link, metric)
             )
         }
 
@@ -993,15 +1025,22 @@ mod python_bindings {
                 Metric::Cosine => "cosine",
                 Metric::Manhattan => "manhattan",
             };
+            let cut_str = match (self.n_clusters, self.distance_threshold) {
+                (Some(k), None) => format!("n_clusters={}", k),
+                (None, Some(t)) => format!("distance_threshold={}", t),
+                _ => "<invalid cut>".to_string(),
+            };
             format!(
-                "AgglomerativeClustering(n_clusters={}, linkage=\"{}\", metric=\"{}\")",
-                self.n_clusters, link_str, met_str
+                "AgglomerativeClustering({}, linkage=\"{}\", metric=\"{}\")",
+                cut_str, link_str, met_str
             )
         }
 
         fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
             let dict = pyo3::types::PyDict::new(py);
+            // Optional fields go in as Python None when the Rust side is None.
             dict.set_item("n_clusters", self.n_clusters)?;
+            dict.set_item("distance_threshold", self.distance_threshold)?;
             dict.set_item(
                 "linkage",
                 match self.linkage {
@@ -1046,6 +1085,11 @@ mod python_bindings {
 
         fn __setstate__(&mut self, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
             self.n_clusters = state.get_item("n_clusters")?.unwrap().extract()?;
+            self.distance_threshold = state
+                .get_item("distance_threshold")?
+                .map(|v| v.extract::<Option<f64>>())
+                .transpose()?
+                .flatten();
             let link_s: String = state.get_item("linkage")?.unwrap().extract()?;
             self.linkage = Linkage::from_str(&link_s)?;
             let met_s: String = state.get_item("metric")?.unwrap().extract()?;
@@ -1071,8 +1115,19 @@ mod python_bindings {
             Ok(())
         }
 
-        fn __getnewargs__(&self) -> (usize,) {
-            (self.n_clusters,)
+        fn __getnewargs__(&self) -> (Option<usize>, &'static str, &'static str, Option<f64>) {
+            let link_str = match self.linkage {
+                Linkage::Ward => "ward",
+                Linkage::Complete => "complete",
+                Linkage::Average => "average",
+                Linkage::Single => "single",
+            };
+            (
+                self.n_clusters,
+                link_str,
+                metric_str(self.metric),
+                self.distance_threshold,
+            )
         }
     }
 
