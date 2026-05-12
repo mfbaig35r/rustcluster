@@ -64,11 +64,23 @@ impl std::str::FromStr for Linkage {
     }
 }
 
+/// How to cut the dendrogram to produce flat clusters.
+///
+/// `NClusters(k)` stops at exactly k clusters (applies n-k lowest-distance
+/// merges). `DistanceThreshold(t)` applies every merge whose reported
+/// distance is strictly less than `t` — matching sklearn's
+/// `AgglomerativeClustering(distance_threshold=t, n_clusters=None)` semantics.
+#[derive(Debug, Clone, Copy)]
+pub enum Cut {
+    NClusters(usize),
+    DistanceThreshold(f64),
+}
+
 // ---- Public entry points ----
 
 pub fn run_agglomerative_with_metric(
     data: &ArrayView2<f64>,
-    n_clusters: usize,
+    cut: Cut,
     linkage: Linkage,
     metric: Metric,
 ) -> Result<AgglomerativeState<f64>, ClusterError> {
@@ -77,20 +89,18 @@ pub fn run_agglomerative_with_metric(
     }
     match metric {
         Metric::Euclidean => {
-            run_agglomerative_generic::<f64, SquaredEuclidean>(data, n_clusters, linkage)
+            run_agglomerative_generic::<f64, SquaredEuclidean>(data, cut, linkage)
         }
-        Metric::Cosine => {
-            run_agglomerative_generic::<f64, CosineDistance>(data, n_clusters, linkage)
-        }
+        Metric::Cosine => run_agglomerative_generic::<f64, CosineDistance>(data, cut, linkage),
         Metric::Manhattan => {
-            run_agglomerative_generic::<f64, ManhattanDistance>(data, n_clusters, linkage)
+            run_agglomerative_generic::<f64, ManhattanDistance>(data, cut, linkage)
         }
     }
 }
 
 pub fn run_agglomerative_with_metric_f32(
     data: &ArrayView2<f32>,
-    n_clusters: usize,
+    cut: Cut,
     linkage: Linkage,
     metric: Metric,
 ) -> Result<AgglomerativeState<f32>, ClusterError> {
@@ -99,13 +109,11 @@ pub fn run_agglomerative_with_metric_f32(
     }
     match metric {
         Metric::Euclidean => {
-            run_agglomerative_generic::<f32, SquaredEuclidean>(data, n_clusters, linkage)
+            run_agglomerative_generic::<f32, SquaredEuclidean>(data, cut, linkage)
         }
-        Metric::Cosine => {
-            run_agglomerative_generic::<f32, CosineDistance>(data, n_clusters, linkage)
-        }
+        Metric::Cosine => run_agglomerative_generic::<f32, CosineDistance>(data, cut, linkage),
         Metric::Manhattan => {
-            run_agglomerative_generic::<f32, ManhattanDistance>(data, n_clusters, linkage)
+            run_agglomerative_generic::<f32, ManhattanDistance>(data, cut, linkage)
         }
     }
 }
@@ -114,20 +122,28 @@ pub fn run_agglomerative_with_metric_f32(
 
 fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
     data: &ArrayView2<F>,
-    target_n_clusters: usize,
+    cut: Cut,
     linkage: Linkage,
 ) -> Result<AgglomerativeState<F>, ClusterError> {
     validate_data_generic(data)?;
 
     let (n, d) = data.dim();
-    if target_n_clusters == 0 || target_n_clusters > n {
-        return Err(ClusterError::InvalidClusters {
-            k: target_n_clusters,
-            n,
-        });
+
+    // Validate the cut spec before doing any work.
+    match cut {
+        Cut::NClusters(k) => {
+            if k == 0 || k > n {
+                return Err(ClusterError::InvalidClusters { k, n });
+            }
+        }
+        Cut::DistanceThreshold(t) => {
+            if !t.is_finite() {
+                return Err(ClusterError::InvalidDistanceThreshold(t));
+            }
+        }
     }
 
-    // Edge case: single point, no merges possible.
+    // Edge case: single point, no merges possible. The cut spec is moot.
     if n == 1 {
         return Ok(AgglomerativeState {
             labels: vec![0i64],
@@ -277,8 +293,11 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
     // NN-chain's chain-order may not be distance-monotonic across chain
     // restarts. Sorting (stable, so chain order breaks ties) gives the
     // canonical scipy linkage matrix ordering. We then take the first
-    // (n - target_n_clusters) sorted merges for both labels and the
-    // children/distances output.
+    // n_to_apply sorted merges for both labels and the children/distances
+    // output. n_to_apply depends on the cut spec:
+    //   - NClusters(k):      n_to_apply = n - k.
+    //   - DistanceThreshold: number of merges whose reported distance is
+    //                        strictly below the threshold (matches sklearn).
     let mut order: Vec<usize> = (0..raw_merges.len()).collect();
     order.sort_by(|&i, &j| {
         raw_merges[i]
@@ -287,7 +306,32 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let n_to_apply = n - target_n_clusters;
+    let n_to_apply: usize = match cut {
+        Cut::NClusters(k) => n - k,
+        Cut::DistanceThreshold(t) => {
+            // Walk the sorted prefix until we hit a merge at or above the
+            // threshold. For Ward, distances are stored squared but reported
+            // as the actual Euclidean distance — compare against the reported
+            // value so sklearn-style thresholds (which are in Euclidean units
+            // for Ward) work as users expect.
+            let mut count = 0usize;
+            for &ord_idx in &order {
+                let raw_d = raw_merges[ord_idx].2;
+                let report_d = if matches!(linkage, Linkage::Ward) {
+                    raw_d.sqrt()
+                } else {
+                    raw_d
+                };
+                if report_d < t {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            count
+        }
+    };
+    let result_n_clusters = n - n_to_apply;
 
     // Union-find on slots for label assignment. Smaller-index becomes the
     // root, mirroring the lo-survives convention used during NN-chain so
@@ -341,7 +385,7 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
 
     Ok(AgglomerativeState {
         labels,
-        n_clusters: target_n_clusters,
+        n_clusters: result_n_clusters,
         children,
         distances: merge_distances,
         _phantom: std::marker::PhantomData,
@@ -375,7 +419,7 @@ mod tests {
             [10.0, 10.1],
         ];
         let result =
-            run_agglomerative_with_metric(&data.view(), 2, Linkage::Ward, Metric::Euclidean)
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
                 .unwrap();
         assert_eq!(result.labels.len(), 6);
         assert_eq!(result.n_clusters, 2);
@@ -395,7 +439,7 @@ mod tests {
     fn test_single_cluster() {
         let data = array![[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]];
         let result =
-            run_agglomerative_with_metric(&data.view(), 1, Linkage::Ward, Metric::Euclidean)
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(1), Linkage::Ward, Metric::Euclidean)
                 .unwrap();
         assert!(result.labels.iter().all(|&l| l == 0));
     }
@@ -404,7 +448,7 @@ mod tests {
     fn test_n_equals_n_clusters() {
         let data = array![[0.0, 0.0], [10.0, 10.0], [20.0, 20.0]];
         let result =
-            run_agglomerative_with_metric(&data.view(), 3, Linkage::Ward, Metric::Euclidean)
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(3), Linkage::Ward, Metric::Euclidean)
                 .unwrap();
         let mut sorted = result.labels.clone();
         sorted.sort();
@@ -415,7 +459,7 @@ mod tests {
     fn test_children_length() {
         let data = array![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [6.0, 0.0]];
         let result =
-            run_agglomerative_with_metric(&data.view(), 2, Linkage::Ward, Metric::Euclidean)
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
                 .unwrap();
         // n=4, target=2 → 2 merges
         assert_eq!(result.children.len(), 2);
@@ -426,7 +470,7 @@ mod tests {
     fn test_distances_non_decreasing() {
         let data = array![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [6.0, 0.0], [20.0, 0.0]];
         let result =
-            run_agglomerative_with_metric(&data.view(), 1, Linkage::Ward, Metric::Euclidean)
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(1), Linkage::Ward, Metric::Euclidean)
                 .unwrap();
         for w in result.distances.windows(2) {
             assert!(w[1] >= w[0] - 1e-10);
@@ -437,7 +481,7 @@ mod tests {
     fn test_complete_linkage() {
         let data = array![[0.0, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0]];
         let result =
-            run_agglomerative_with_metric(&data.view(), 2, Linkage::Complete, Metric::Euclidean)
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Complete, Metric::Euclidean)
                 .unwrap();
         assert_eq!(result.labels[0], result.labels[1]);
         assert_eq!(result.labels[2], result.labels[3]);
@@ -448,7 +492,7 @@ mod tests {
     fn test_average_linkage() {
         let data = array![[0.0, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0]];
         let result =
-            run_agglomerative_with_metric(&data.view(), 2, Linkage::Average, Metric::Euclidean)
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Average, Metric::Euclidean)
                 .unwrap();
         assert_eq!(result.labels[0], result.labels[1]);
         assert_ne!(result.labels[0], result.labels[2]);
@@ -458,7 +502,7 @@ mod tests {
     fn test_single_linkage() {
         let data = array![[0.0, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0]];
         let result =
-            run_agglomerative_with_metric(&data.view(), 2, Linkage::Single, Metric::Euclidean)
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Single, Metric::Euclidean)
                 .unwrap();
         assert_eq!(result.labels[0], result.labels[1]);
         assert_ne!(result.labels[0], result.labels[2]);
@@ -468,7 +512,7 @@ mod tests {
     fn test_ward_requires_euclidean() {
         let data = array![[0.0, 0.0], [1.0, 1.0]];
         assert!(matches!(
-            run_agglomerative_with_metric(&data.view(), 1, Linkage::Ward, Metric::Cosine),
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(1), Linkage::Ward, Metric::Cosine),
             Err(ClusterError::WardRequiresEuclidean)
         ));
     }
@@ -477,7 +521,7 @@ mod tests {
     fn test_manhattan_metric() {
         let data = array![[0.0, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0]];
         let result =
-            run_agglomerative_with_metric(&data.view(), 2, Linkage::Complete, Metric::Manhattan)
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Complete, Metric::Manhattan)
                 .unwrap();
         assert_eq!(result.labels[0], result.labels[1]);
     }
@@ -486,7 +530,7 @@ mod tests {
     fn test_f32() {
         let data = array![[0.0f32, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0],];
         let result =
-            run_agglomerative_with_metric_f32(&data.view(), 2, Linkage::Ward, Metric::Euclidean)
+            run_agglomerative_with_metric_f32(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
                 .unwrap();
         assert_eq!(result.labels.len(), 4);
         assert_eq!(result.n_clusters, 2);
@@ -496,7 +540,7 @@ mod tests {
     fn test_invalid_n_clusters() {
         let data = array![[0.0, 0.0], [1.0, 1.0]];
         assert!(matches!(
-            run_agglomerative_with_metric(&data.view(), 5, Linkage::Ward, Metric::Euclidean),
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(5), Linkage::Ward, Metric::Euclidean),
             Err(ClusterError::InvalidClusters { .. })
         ));
     }
@@ -505,7 +549,7 @@ mod tests {
     fn test_empty_input() {
         let data = Array2::<f64>::zeros((0, 2));
         assert!(matches!(
-            run_agglomerative_with_metric(&data.view(), 1, Linkage::Ward, Metric::Euclidean),
+            run_agglomerative_with_metric(&data.view(), Cut::NClusters(1), Linkage::Ward, Metric::Euclidean),
             Err(ClusterError::EmptyInput)
         ));
     }
@@ -513,9 +557,9 @@ mod tests {
     #[test]
     fn test_deterministic() {
         let data = array![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [6.0, 0.0]];
-        let r1 = run_agglomerative_with_metric(&data.view(), 2, Linkage::Ward, Metric::Euclidean)
+        let r1 = run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
             .unwrap();
-        let r2 = run_agglomerative_with_metric(&data.view(), 2, Linkage::Ward, Metric::Euclidean)
+        let r2 = run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
             .unwrap();
         assert_eq!(r1.labels, r2.labels);
     }
@@ -556,7 +600,7 @@ mod tests {
         let data = ndarray::Array2::from_shape_vec((rows.len(), 2), rows.concat()).unwrap();
         let result = run_agglomerative_with_metric_f32(
             &data.view(),
-            3,
+            Cut::NClusters(3),
             Linkage::Average,
             Metric::Cosine,
         )
@@ -581,5 +625,154 @@ mod tests {
                 result.distances
             );
         }
+    }
+
+    // ---- distance_threshold mode (Phase 3) ----
+
+    #[test]
+    fn test_distance_threshold_typical() {
+        // Two tight pairs separated by a wide gap. With Euclidean + complete
+        // linkage, intra-pair distances are 1.0 and the inter-pair distance is
+        // 100. A threshold of 5.0 should produce two clusters; a threshold of
+        // 200.0 should produce one.
+        let data = array![[0.0, 0.0], [1.0, 0.0], [100.0, 0.0], [101.0, 0.0]];
+
+        let tight = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::DistanceThreshold(5.0),
+            Linkage::Complete,
+            Metric::Euclidean,
+        )
+        .unwrap();
+        assert_eq!(tight.n_clusters, 2);
+        assert_eq!(tight.labels[0], tight.labels[1]);
+        assert_eq!(tight.labels[2], tight.labels[3]);
+        assert_ne!(tight.labels[0], tight.labels[2]);
+
+        let loose = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::DistanceThreshold(200.0),
+            Linkage::Complete,
+            Metric::Euclidean,
+        )
+        .unwrap();
+        assert_eq!(loose.n_clusters, 1);
+        for &l in &loose.labels {
+            assert_eq!(l, loose.labels[0]);
+        }
+    }
+
+    #[test]
+    fn test_distance_threshold_too_low_keeps_singletons() {
+        // Threshold below every pairwise distance → no merges, n singletons.
+        let data = array![[0.0, 0.0], [1.0, 0.0], [10.0, 0.0]];
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::DistanceThreshold(0.5),
+            Linkage::Complete,
+            Metric::Euclidean,
+        )
+        .unwrap();
+        assert_eq!(result.n_clusters, 3);
+        assert_eq!(result.children.len(), 0);
+        assert_eq!(result.distances.len(), 0);
+        let mut sorted = result.labels.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_distance_threshold_sklearn_semantics_strict_lt() {
+        // sklearn: "linkage distance threshold at or above which clusters will
+        // not be merged" — exact-equality merges are NOT applied. Verify this
+        // strict-less-than semantics with an exactly-on-threshold case.
+        let data = array![[0.0, 0.0], [1.0, 0.0], [10.0, 0.0]];
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::DistanceThreshold(1.0), // d(0,1) is exactly 1.0
+            Linkage::Complete,
+            Metric::Euclidean,
+        )
+        .unwrap();
+        // Strict <: the 1.0 merge is not applied, so we keep three singletons.
+        assert_eq!(result.n_clusters, 3);
+    }
+
+    #[test]
+    fn test_distance_threshold_ward_uses_reported_distance() {
+        // For Ward the matrix stores squared Euclidean internally but the
+        // reported distance is sqrt. Threshold comparisons should match the
+        // reported value (sklearn's convention), so a threshold of 1.5
+        // applied to two points 1 unit apart should merge them (sqrt(1.0) < 1.5).
+        let data = array![[0.0, 0.0], [1.0, 0.0], [100.0, 0.0]];
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::DistanceThreshold(1.5),
+            Linkage::Ward,
+            Metric::Euclidean,
+        )
+        .unwrap();
+        // d(0,1)=1.0 below threshold → merged. d(merged, 2) is ≫ 1.5.
+        assert_eq!(result.n_clusters, 2);
+        assert_eq!(result.labels[0], result.labels[1]);
+        assert_ne!(result.labels[0], result.labels[2]);
+    }
+
+    #[test]
+    fn test_distance_threshold_cosine_supplier_workload() {
+        // Mirror the supplier-clustering notebook: average linkage, cosine
+        // distance, threshold around 0.2. Three tight cosine clusters should
+        // separate cleanly.
+        let n_per = 8;
+        let mut rows: Vec<[f32; 2]> = Vec::with_capacity(3 * n_per);
+        let centers = [(0.0f32, 1.0f32), (1.0, 0.0), (-0.7, -0.7)];
+        for (cx, cy) in centers {
+            for k in 0..n_per {
+                let jitter = (k as f32) * 1e-4;
+                rows.push([cx + jitter, cy - jitter]);
+            }
+        }
+        let data = ndarray::Array2::from_shape_vec((rows.len(), 2), rows.concat()).unwrap();
+        let result = run_agglomerative_with_metric_f32(
+            &data.view(),
+            Cut::DistanceThreshold(0.2),
+            Linkage::Average,
+            Metric::Cosine,
+        )
+        .unwrap();
+        assert_eq!(result.n_clusters, 3);
+        for block in 0..3 {
+            let base = result.labels[block * n_per];
+            for k in 1..n_per {
+                assert_eq!(
+                    result.labels[block * n_per + k],
+                    base,
+                    "block {block} row {k} mislabeled"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_distance_threshold_invalid_nan() {
+        let data = array![[0.0, 0.0], [1.0, 0.0]];
+        assert!(matches!(
+            run_agglomerative_with_metric(
+                &data.view(),
+                Cut::DistanceThreshold(f64::NAN),
+                Linkage::Ward,
+                Metric::Euclidean,
+            ),
+            Err(ClusterError::InvalidDistanceThreshold(_))
+        ));
+        assert!(matches!(
+            run_agglomerative_with_metric(
+                &data.view(),
+                Cut::DistanceThreshold(f64::INFINITY),
+                Linkage::Ward,
+                Metric::Euclidean,
+            ),
+            Err(ClusterError::InvalidDistanceThreshold(_))
+        ));
     }
 }

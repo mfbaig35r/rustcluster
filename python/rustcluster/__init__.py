@@ -485,22 +485,44 @@ class AgglomerativeClustering:
 
     Parameters
     ----------
-    n_clusters : int, default=2
-        Number of clusters to find.
+    n_clusters : int or None, default=2
+        Number of clusters to find. Must be ``None`` if ``distance_threshold``
+        is set. Exactly one of ``n_clusters`` and ``distance_threshold`` must
+        be specified — matches sklearn's API.
     linkage : str, default="ward"
         Linkage criterion: "ward", "complete", "average", or "single".
         Ward requires euclidean metric.
     metric : str, default="euclidean"
         Distance metric: "euclidean", "cosine", or "manhattan".
+    distance_threshold : float or None, default=None
+        Linkage distance threshold at or above which clusters will not be
+        merged. When set, ``n_clusters`` must be ``None``. The number of
+        clusters formed is determined by the data and is exposed via
+        ``n_clusters_`` after fitting.
     """
 
-    def __init__(self, n_clusters=2, linkage="ward", metric="euclidean"):
+    def __init__(self, n_clusters=2, linkage="ward", metric="euclidean",
+                 distance_threshold=None):
+        if distance_threshold is not None and n_clusters is not None:
+            raise ValueError(
+                "Exactly one of n_clusters and distance_threshold must be "
+                "set; pass n_clusters=None when using distance_threshold."
+            )
+        if distance_threshold is None and n_clusters is None:
+            raise ValueError(
+                "Exactly one of n_clusters and distance_threshold must be "
+                "set; both were None."
+            )
         self._model = _RustAgglomerative(
-            n_clusters=n_clusters, linkage=linkage, metric=metric,
+            n_clusters=n_clusters,
+            linkage=linkage,
+            metric=metric,
+            distance_threshold=distance_threshold,
         )
         self._n_clusters = n_clusters
         self._linkage = linkage
         self._metric = metric
+        self._distance_threshold = distance_threshold
 
     def fit(self, X):
         """Fit the model to data.
@@ -552,14 +574,21 @@ class AgglomerativeClustering:
         return self._model.distances_
 
     def __repr__(self):
+        if self._distance_threshold is not None:
+            cut = f"distance_threshold={self._distance_threshold}"
+        else:
+            cut = f"n_clusters={self._n_clusters}"
         return (
-            f"AgglomerativeClustering(n_clusters={self._n_clusters}, "
+            f"AgglomerativeClustering({cut}, "
             f"linkage=\"{self._linkage}\", metric=\"{self._metric}\")"
         )
 
     def __getstate__(self):
         return {"model_state": self._model.__getstate__(), "params": {
-            "n_clusters": self._n_clusters, "linkage": self._linkage, "metric": self._metric,
+            "n_clusters": self._n_clusters,
+            "linkage": self._linkage,
+            "metric": self._metric,
+            "distance_threshold": self._distance_threshold,
         }}
 
     def __setstate__(self, state):
