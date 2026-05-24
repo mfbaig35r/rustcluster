@@ -55,12 +55,26 @@ pub fn run_hamerly_iterations<F: Scalar, D: Distance<F>>(
             .collect();
 
         inertia = 0.0;
+        let mut fit_dist_sums = vec![0.0f64; k];
+        let mut fit_dist_counts = vec![0usize; k];
         for (i, &(label, best_dist, second_dist)) in assignments.iter().enumerate() {
             labels[i] = label;
             upper[i] = best_dist.to_f64_lossy().sqrt();
             lower[i] = second_dist.to_f64_lossy().sqrt();
-            inertia += best_dist.to_f64_lossy();
+            let best_f64 = best_dist.to_f64_lossy();
+            inertia += best_f64;
+            fit_dist_sums[label] += best_f64;
+            fit_dist_counts[label] += 1;
         }
+        let early_exit_fit_mean_distances: Vec<f64> = (0..k)
+            .map(|c| {
+                if fit_dist_counts[c] > 0 {
+                    fit_dist_sums[c] / fit_dist_counts[c] as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect();
 
         let old_centroids = centroids.clone();
         recompute_centroids(data_slice, &labels, centroids, n, d, k);
@@ -86,6 +100,7 @@ pub fn run_hamerly_iterations<F: Scalar, D: Distance<F>>(
                 labels,
                 inertia,
                 n_iter,
+                fit_mean_distances: early_exit_fit_mean_distances,
             });
         }
     }
@@ -155,16 +170,37 @@ pub fn run_hamerly_iterations<F: Scalar, D: Distance<F>>(
         }
     }
 
-    // Final inertia computation
+    // Final inertia + per-cluster mean-distance pass
     let centroids_slice = centroids.as_slice().expect("centroids are C-contiguous");
-    inertia = (0..n)
+    let per_point_dists: Vec<f64> = (0..n)
         .into_par_iter()
         .map(|i| {
             let point = &data_slice[i * d..(i + 1) * d];
             let centroid = &centroids_slice[labels[i] * d..(labels[i] + 1) * d];
             D::distance(point, centroid).to_f64_lossy()
         })
-        .sum();
+        .collect();
+
+    inertia = 0.0;
+    let mut fit_dist_sums = vec![0.0f64; k];
+    let mut fit_dist_counts = vec![0usize; k];
+    for (i, &dist) in per_point_dists.iter().enumerate() {
+        inertia += dist;
+        let label = labels[i];
+        if label < k {
+            fit_dist_sums[label] += dist;
+            fit_dist_counts[label] += 1;
+        }
+    }
+    let fit_mean_distances: Vec<f64> = (0..k)
+        .map(|c| {
+            if fit_dist_counts[c] > 0 {
+                fit_dist_sums[c] / fit_dist_counts[c] as f64
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
     let centroids_flat = std::sync::Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
     Ok(KMeansState {
@@ -173,6 +209,7 @@ pub fn run_hamerly_iterations<F: Scalar, D: Distance<F>>(
         labels,
         inertia,
         n_iter,
+        fit_mean_distances,
     })
 }
 

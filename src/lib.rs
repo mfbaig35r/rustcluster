@@ -373,6 +373,7 @@ mod python_bindings {
                     )?;
                     dict.set_item("inertia", s.inertia)?;
                     dict.set_item("n_iter", s.n_iter)?;
+                    dict.set_item("fit_mean_distances", s.fit_mean_distances.clone())?;
                 }
                 Some(FittedState::F32(s)) => {
                     dict.set_item("fitted", true)?;
@@ -387,6 +388,7 @@ mod python_bindings {
                     )?;
                     dict.set_item("inertia", s.inertia)?;
                     dict.set_item("n_iter", s.n_iter)?;
+                    dict.set_item("fit_mean_distances", s.fit_mean_distances.clone())?;
                 }
             }
             Ok(dict.into())
@@ -409,6 +411,10 @@ mod python_bindings {
                 let labels: Vec<usize> = labels_i64.iter().map(|&l| l as usize).collect();
                 let inertia: f64 = state.get_item("inertia")?.unwrap().extract()?;
                 let n_iter: usize = state.get_item("n_iter")?.unwrap().extract()?;
+                let fit_mean_distances: Vec<f64> = match state.get_item("fit_mean_distances")? {
+                    Some(v) => v.extract()?,
+                    None => vec![0.0; self.n_clusters],
+                };
                 if dtype == "float32" {
                     let arr = state
                         .get_item("centroids")?
@@ -423,6 +429,7 @@ mod python_bindings {
                         labels,
                         inertia,
                         n_iter,
+                        fit_mean_distances,
                     }));
                 } else {
                     let arr = state
@@ -438,6 +445,7 @@ mod python_bindings {
                         labels,
                         inertia,
                         n_iter,
+                        fit_mean_distances,
                     }));
                 }
             }
@@ -1365,6 +1373,7 @@ mod python_bindings {
                     )?;
                     dict.set_item("inertia", s.inertia)?;
                     dict.set_item("n_iter", s.n_iter)?;
+                    dict.set_item("fit_mean_distances", s.fit_mean_distances.clone())?;
                 }
                 Some(MiniBatchFittedState::F32(s)) => {
                     dict.set_item("fitted", true)?;
@@ -1379,6 +1388,7 @@ mod python_bindings {
                     )?;
                     dict.set_item("inertia", s.inertia)?;
                     dict.set_item("n_iter", s.n_iter)?;
+                    dict.set_item("fit_mean_distances", s.fit_mean_distances.clone())?;
                 }
             }
             Ok(dict.into())
@@ -1400,6 +1410,10 @@ mod python_bindings {
                 let labels: Vec<usize> = labels_i64.iter().map(|&l| l as usize).collect();
                 let inertia: f64 = state.get_item("inertia")?.unwrap().extract()?;
                 let n_iter: usize = state.get_item("n_iter")?.unwrap().extract()?;
+                let fit_mean_distances: Vec<f64> = match state.get_item("fit_mean_distances")? {
+                    Some(v) => v.extract()?,
+                    None => vec![0.0; self.n_clusters],
+                };
                 if dtype == "float32" {
                     let arr = state
                         .get_item("centroids")?
@@ -1414,6 +1428,7 @@ mod python_bindings {
                         labels,
                         inertia,
                         n_iter,
+                        fit_mean_distances,
                     }));
                 } else {
                     let arr = state
@@ -1429,6 +1444,7 @@ mod python_bindings {
                         labels,
                         inertia,
                         n_iter,
+                        fit_mean_distances,
                     }));
                 }
             }
@@ -2341,11 +2357,14 @@ mod python_bindings {
         }
 
         fn __repr__(&self) -> String {
+            let rate_str = if self.inner.rejection_rate.is_nan() {
+                "N/A".to_string()
+            } else {
+                format!("{:.2}%", self.inner.rejection_rate * 100.0)
+            };
             format!(
-                "DriftReport(n_samples={}, global_mean_distance={:.4}, rejection_rate={:.2}%)",
-                self.inner.n_samples,
-                self.inner.global_mean_distance,
-                self.inner.rejection_rate * 100.0
+                "DriftReport(n_samples={}, global_mean_distance={:.4}, rejection_rate={})",
+                self.inner.n_samples, self.inner.global_mean_distance, rate_str,
             )
         }
     }
