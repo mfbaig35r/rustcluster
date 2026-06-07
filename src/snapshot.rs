@@ -79,6 +79,17 @@ pub struct ClusterVariances {
     pub variances: Vec<f64>,
 }
 
+/// Per-cluster mean and std of the fit-time assignment distance / similarity.
+///
+/// Populated by `calibrate()`. For non-spherical algorithms the values are
+/// Euclidean (or Manhattan) distances; for spherical algorithms they are
+/// cosine similarities. Used by `drift_report` to compute `rejection_rate`.
+#[derive(Debug, Clone)]
+pub struct ClusterDistanceStats {
+    pub mean: Vec<f64>,
+    pub std: Vec<f64>,
+}
+
 /// Cluster snapshot for frozen centroid assignment.
 pub struct ClusterSnapshot {
     pub algorithm: SnapshotAlgorithm,
@@ -96,7 +107,11 @@ pub struct ClusterSnapshot {
     pub input_dim: usize,
     /// Preprocessing to apply to new data.
     pub preprocessing: Preprocessing,
-    /// Per-cluster mean distance at fit time (for drift detection).
+    /// Per-cluster mean assignment quantity at fit time (k entries).
+    ///
+    /// For non-spherical algorithms (KMeans, MiniBatchKMeans): Euclidean (or
+    /// Manhattan) distance. For spherical algorithms (EmbeddingCluster):
+    /// cosine similarity. Interpret with the `spherical` field.
     pub fit_mean_distances: Vec<f64>,
     /// Per-cluster sample count from training.
     pub fit_cluster_sizes: Vec<usize>,
@@ -114,6 +129,9 @@ pub struct ClusterSnapshot {
     pub fit_kappa: Option<Vec<f64>>,
     /// Per-cluster mean resultant length from fit time (spherical only).
     pub fit_resultant_lengths: Option<Vec<f64>>,
+    /// Per-cluster mean+std of fit-time assignment distance (from calibrate()).
+    /// Used by `drift_report` for `rejection_rate`. NaN when absent.
+    pub fit_distance_stats: Option<ClusterDistanceStats>,
 }
 
 // ---- Factory constructors ----
@@ -133,7 +151,7 @@ impl ClusterSnapshot {
             d,
             input_dim: d,
             preprocessing: Preprocessing::None,
-            fit_mean_distances: vec![0.0; k],
+            fit_mean_distances: state.fit_mean_distances.clone(),
             fit_cluster_sizes,
             fit_n_samples: n_samples,
             version: 1,
@@ -141,6 +159,7 @@ impl ClusterSnapshot {
             cluster_variances: None,
             fit_kappa: None,
             fit_resultant_lengths: None,
+            fit_distance_stats: None,
         }
     }
 
@@ -159,7 +178,7 @@ impl ClusterSnapshot {
             d,
             input_dim: d,
             preprocessing: Preprocessing::None,
-            fit_mean_distances: vec![0.0; k],
+            fit_mean_distances: state.fit_mean_distances.clone(),
             fit_cluster_sizes,
             fit_n_samples: n_samples,
             version: 1,
@@ -167,6 +186,7 @@ impl ClusterSnapshot {
             cluster_variances: None,
             fit_kappa: None,
             fit_resultant_lengths: None,
+            fit_distance_stats: None,
         }
     }
 
@@ -187,7 +207,7 @@ impl ClusterSnapshot {
             d,
             input_dim: d,
             preprocessing: Preprocessing::None,
-            fit_mean_distances: vec![0.0; k],
+            fit_mean_distances: state.fit_mean_distances.clone(),
             fit_cluster_sizes,
             fit_n_samples: n_samples,
             version: 1,
@@ -195,6 +215,7 @@ impl ClusterSnapshot {
             cluster_variances: None,
             fit_kappa: None,
             fit_resultant_lengths: None,
+            fit_distance_stats: None,
         }
     }
 
@@ -216,7 +237,7 @@ impl ClusterSnapshot {
             d,
             input_dim: d,
             preprocessing: Preprocessing::None,
-            fit_mean_distances: vec![0.0; k],
+            fit_mean_distances: state.fit_mean_distances.clone(),
             fit_cluster_sizes,
             fit_n_samples: n_samples,
             version: 1,
@@ -224,6 +245,7 @@ impl ClusterSnapshot {
             cluster_variances: None,
             fit_kappa: None,
             fit_resultant_lengths: None,
+            fit_distance_stats: None,
         }
     }
 
@@ -271,6 +293,7 @@ impl ClusterSnapshot {
             cluster_variances: None,
             fit_kappa: None,
             fit_resultant_lengths: Some(resultant_lengths.to_vec()),
+            fit_distance_stats: None,
         }
     }
 }
@@ -537,7 +560,9 @@ pub struct DriftReport {
     pub relative_drift: Vec<f64>,
     /// Global mean distance across all new points.
     pub global_mean_distance: f64,
-    /// Fraction of points that would be rejected at various distance thresholds.
+    /// Fraction of points whose assignment distance/similarity falls more than
+    /// 3 std outside the per-cluster fit-time distribution. NaN when the
+    /// snapshot has not been calibrated (call `calibrate()` first).
     pub rejection_rate: f64,
     /// Total points analyzed.
     pub n_samples: usize,
@@ -552,6 +577,11 @@ pub struct DriftReport {
 impl ClusterSnapshot {
     /// Compute drift statistics for new data against the original fit.
     pub fn drift_report(&self, data: &[f64], n: usize) -> Result<DriftReport, ClusterError> {
+        debug_assert_eq!(
+            self.fit_mean_distances.len(),
+            self.k,
+            "snapshot factory must populate fit_mean_distances with k entries",
+        );
         let result = self.assign_batch(data, n)?;
         let k = self.k;
 
@@ -596,24 +626,40 @@ impl ClusterSnapshot {
         let total_dist: f64 = result.distances.iter().sum();
         let global_mean_distance = if n > 0 { total_dist / n as f64 } else { 0.0 };
 
-        // Rejection rate: fraction of points with distance > 2 * global mean at fit
-        let fit_global_mean = if self.fit_n_samples > 0 {
-            self.fit_mean_distances.iter().sum::<f64>() / k as f64
-        } else {
-            0.0
-        };
-        let rejection_rate = if fit_global_mean.abs() > 1e-30 && n > 0 {
-            let threshold = 2.0 * fit_global_mean;
-            let rejected = if self.spherical {
-                // For similarity: reject if below threshold
-                result.distances.iter().filter(|&&d| d < threshold).count()
-            } else {
-                // For distance: reject if above threshold
-                result.distances.iter().filter(|&&d| d > threshold).count()
-            };
-            rejected as f64 / n as f64
-        } else {
-            0.0
+        // Rejection rate: fraction of points whose assignment distance falls
+        // outside the per-cluster fit-time distribution by more than k_sigma
+        // standard deviations. Requires calibration; NaN otherwise.
+        //
+        // For non-spherical (distance) metrics: outlier = unusually high distance.
+        // For spherical (similarity) metrics: outlier = unusually low similarity.
+        let rejection_rate = match self.fit_distance_stats.as_ref() {
+            Some(stats) if n > 0 => {
+                let k_sigma = 3.0_f64;
+                let mut rejected = 0usize;
+                for i in 0..n {
+                    let label = result.labels[i];
+                    if label < 0 {
+                        continue;
+                    }
+                    let c = label as usize;
+                    if c >= k {
+                        continue;
+                    }
+                    let mean = stats.mean[c];
+                    let std = stats.std[c].max(1e-12);
+                    let d_val = result.distances[i];
+                    let is_outlier = if self.spherical {
+                        d_val < mean - k_sigma * std
+                    } else {
+                        d_val > mean + k_sigma * std
+                    };
+                    if is_outlier {
+                        rejected += 1;
+                    }
+                }
+                rejected as f64 / n as f64
+            }
+            _ => f64::NAN,
         };
 
         // vMF drift (spherical + calibrated only)
@@ -805,6 +851,42 @@ impl ClusterSnapshot {
         }
         self.cluster_variances = Some(ClusterVariances {
             variances: var_flat,
+        });
+
+        // --- Per-cluster mean+std of assignment distance (for rejection_rate) ---
+        let mut dist_sums = vec![0.0f64; k];
+        let mut dist_sq_sums = vec![0.0f64; k];
+        let mut dist_counts = vec![0usize; k];
+        for i in 0..n {
+            let label = result.labels[i];
+            if label < 0 {
+                continue;
+            }
+            let c = label as usize;
+            if c >= k {
+                continue;
+            }
+            let d_val = result.distances[i];
+            dist_sums[c] += d_val;
+            dist_sq_sums[c] += d_val * d_val;
+            dist_counts[c] += 1;
+        }
+        let mut dist_mean = vec![0.0f64; k];
+        let mut dist_std = vec![0.0f64; k];
+        for c in 0..k {
+            if dist_counts[c] > 0 {
+                let m = dist_sums[c] / dist_counts[c] as f64;
+                dist_mean[c] = m;
+                if dist_counts[c] > 1 {
+                    let denom = (dist_counts[c] - 1) as f64;
+                    let var = ((dist_sq_sums[c] - dist_counts[c] as f64 * m * m) / denom).max(0.0);
+                    dist_std[c] = var.sqrt();
+                }
+            }
+        }
+        self.fit_distance_stats = Some(ClusterDistanceStats {
+            mean: dist_mean,
+            std: dist_std,
         });
 
         self.version = 2;
@@ -1009,6 +1091,7 @@ mod tests {
             cluster_variances: None,
             fit_kappa: None,
             fit_resultant_lengths: None,
+            fit_distance_stats: None,
         }
     }
 
@@ -1030,6 +1113,7 @@ mod tests {
             cluster_variances: None,
             fit_kappa: None,
             fit_resultant_lengths: None,
+            fit_distance_stats: None,
         }
     }
 

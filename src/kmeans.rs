@@ -21,6 +21,10 @@ pub struct KMeansState<F: Scalar> {
     pub labels: Vec<usize>,
     pub inertia: f64, // always f64 for consistency at the Python boundary
     pub n_iter: usize,
+    /// Per-cluster mean assignment distance at fit time (k entries, f64).
+    /// Populated by Lloyd / Hamerly drivers; consumed by ClusterSnapshot for
+    /// drift detection. Clusters with zero assigned points have entry 0.0.
+    pub fit_mean_distances: Vec<f64>,
 }
 
 /// Algorithm selection for K-means.
@@ -258,6 +262,7 @@ fn run_lloyd_iterations<F: Scalar, D: Distance<F>>(
     let mut labels = vec![0usize; n];
     let mut inertia = f64::MAX;
     let mut n_iter = 0;
+    let mut fit_mean_distances = vec![0.0f64; k];
 
     let mut old_centroid_buf = vec![F::zero(); k * d];
 
@@ -278,6 +283,20 @@ fn run_lloyd_iterations<F: Scalar, D: Distance<F>>(
             new_inertia += dist.to_f64_lossy();
         }
         inertia = new_inertia;
+
+        let mut cluster_dist_sums = vec![0.0f64; k];
+        let mut cluster_counts = vec![0usize; k];
+        for &(label, dist) in &assignments {
+            cluster_dist_sums[label] += dist.to_f64_lossy();
+            cluster_counts[label] += 1;
+        }
+        for c in 0..k {
+            fit_mean_distances[c] = if cluster_counts[c] > 0 {
+                cluster_dist_sums[c] / cluster_counts[c] as f64
+            } else {
+                0.0
+            };
+        }
 
         old_centroid_buf.copy_from_slice(centroids_slice);
 
@@ -310,6 +329,7 @@ fn run_lloyd_iterations<F: Scalar, D: Distance<F>>(
         labels,
         inertia,
         n_iter,
+        fit_mean_distances,
     })
 }
 

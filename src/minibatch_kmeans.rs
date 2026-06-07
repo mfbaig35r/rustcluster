@@ -29,6 +29,10 @@ pub struct MiniBatchKMeansState<F: Scalar> {
     pub labels: Vec<usize>,
     pub inertia: f64,
     pub n_iter: usize,
+    /// Per-cluster mean assignment distance at fit time (k entries, f64).
+    /// Computed from the final full-data assignment pass. Clusters with zero
+    /// assigned points have entry 0.0.
+    pub fit_mean_distances: Vec<f64>,
 }
 
 // ---- Public entry points ----
@@ -236,10 +240,24 @@ fn run_minibatch_generic<F: Scalar, D: Distance<F>>(
 
     let mut labels = vec![0usize; n];
     let mut inertia = 0.0f64;
+    let mut fit_dist_sums = vec![0.0f64; k];
+    let mut fit_dist_counts = vec![0usize; k];
     for (i, &(cluster, dist)) in final_assignments.iter().enumerate() {
         labels[i] = cluster;
-        inertia += dist.to_f64_lossy();
+        let dist_f64 = dist.to_f64_lossy();
+        inertia += dist_f64;
+        fit_dist_sums[cluster] += dist_f64;
+        fit_dist_counts[cluster] += 1;
     }
+    let fit_mean_distances: Vec<f64> = (0..k)
+        .map(|c| {
+            if fit_dist_counts[c] > 0 {
+                fit_dist_sums[c] / fit_dist_counts[c] as f64
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
     let centroids_flat = Arc::new(centroids.as_slice().expect("C-contiguous").to_vec());
     Ok(MiniBatchKMeansState {
@@ -248,6 +266,7 @@ fn run_minibatch_generic<F: Scalar, D: Distance<F>>(
         labels,
         inertia,
         n_iter,
+        fit_mean_distances,
     })
 }
 

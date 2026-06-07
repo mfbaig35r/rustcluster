@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::embedding::reduction::PcaProjection;
 use crate::error::ClusterError;
 use crate::snapshot::{
-    ClusterConfidenceStats, ClusterSnapshot, ClusterVariances, Preprocessing, SnapshotAlgorithm,
+    ClusterConfidenceStats, ClusterDistanceStats, ClusterSnapshot, ClusterVariances, Preprocessing,
+    SnapshotAlgorithm,
 };
 
 const SNAPSHOT_VERSION: u32 = 2;
@@ -49,6 +50,10 @@ struct SnapshotMetadata {
     fit_kappa: Option<Vec<f64>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     fit_resultant_lengths: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    fit_distance_mean: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    fit_distance_std: Option<Vec<f64>>,
 }
 
 /// Save a snapshot to a directory.
@@ -120,6 +125,11 @@ pub fn save_snapshot(snapshot: &ClusterSnapshot, dir: &str) -> Result<(), Cluste
             None => (None, None, None, None),
         };
 
+    let (fit_distance_mean, fit_distance_std) = match &snapshot.fit_distance_stats {
+        Some(stats) => (Some(stats.mean.clone()), Some(stats.std.clone())),
+        None => (None, None),
+    };
+
     let metadata = SnapshotMetadata {
         version: snapshot.version,
         algorithm: snapshot.algorithm.as_str().to_string(),
@@ -140,6 +150,8 @@ pub fn save_snapshot(snapshot: &ClusterSnapshot, dir: &str) -> Result<(), Cluste
         confidence_p50,
         fit_kappa: snapshot.fit_kappa.clone(),
         fit_resultant_lengths: snapshot.fit_resultant_lengths.clone(),
+        fit_distance_mean,
+        fit_distance_std,
     };
 
     let json = serde_json::to_string_pretty(&metadata)
@@ -241,6 +253,11 @@ pub fn load_snapshot(dir: &str) -> Result<ClusterSnapshot, ClusterError> {
         _ => None,
     };
 
+    let fit_distance_stats = match (metadata.fit_distance_mean, metadata.fit_distance_std) {
+        (Some(mean), Some(std)) => Some(ClusterDistanceStats { mean, std }),
+        _ => None,
+    };
+
     // Load cluster variances tensor if present
     let cluster_variances = tensors
         .tensor("cluster_variances")
@@ -266,6 +283,7 @@ pub fn load_snapshot(dir: &str) -> Result<ClusterSnapshot, ClusterError> {
         cluster_variances,
         fit_kappa: metadata.fit_kappa,
         fit_resultant_lengths: metadata.fit_resultant_lengths,
+        fit_distance_stats,
     })
 }
 
@@ -318,6 +336,7 @@ mod tests {
             cluster_variances: None,
             fit_kappa: None,
             fit_resultant_lengths: None,
+            fit_distance_stats: None,
         }
     }
 
@@ -345,6 +364,7 @@ mod tests {
             cluster_variances: None,
             fit_kappa: None,
             fit_resultant_lengths: None,
+            fit_distance_stats: None,
         }
     }
 

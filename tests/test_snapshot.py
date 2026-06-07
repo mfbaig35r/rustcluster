@@ -246,3 +246,47 @@ class TestDriftReport:
         snap = m.snapshot()
         report = snap.drift_report(X)
         assert report.n_samples_ == 90
+
+    def test_kmeans_relative_drift_finite(self, well_separated_data):
+        m = KMeans(n_clusters=2, random_state=42).fit(well_separated_data)
+        snap = m.snapshot()
+        report = snap.drift_report(well_separated_data)
+        rd = np.asarray(report.relative_drift_)
+        assert np.all(np.isfinite(rd)), f"relative_drift has non-finite entries: {rd}"
+
+    def test_rejection_rate_nan_uncalibrated(self, well_separated_data):
+        m = KMeans(n_clusters=2, random_state=42).fit(well_separated_data)
+        snap = m.snapshot()
+        report = snap.drift_report(well_separated_data)
+        assert np.isnan(report.rejection_rate_), (
+            f"uncalibrated snapshot should yield NaN rejection_rate, got {report.rejection_rate_}"
+        )
+
+    def test_rejection_rate_low_for_in_distribution(self, well_separated_data):
+        m = KMeans(n_clusters=2, random_state=42).fit(well_separated_data)
+        snap = m.snapshot()
+        snap.calibrate(well_separated_data)
+        report = snap.drift_report(well_separated_data)
+        assert report.rejection_rate_ < 0.10, (
+            f"in-distribution rejection rate too high: {report.rejection_rate_}"
+        )
+
+    def test_rejection_rate_high_for_shifted(self, well_separated_data):
+        m = KMeans(n_clusters=2, random_state=42).fit(well_separated_data)
+        snap = m.snapshot()
+        snap.calibrate(well_separated_data)
+        report = snap.drift_report(well_separated_data + 50.0)
+        assert report.rejection_rate_ > 0.50, (
+            f"heavily shifted rejection rate too low: {report.rejection_rate_}"
+        )
+
+    def test_embedding_rejection_rate_low_for_in_distribution(self):
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((200, 64)).astype(np.float32)
+        m = EmbeddingCluster(n_clusters=5, reduction_dim=16).fit(X)
+        snap = m.snapshot()
+        snap.calibrate(X)
+        report = snap.drift_report(X)
+        assert report.rejection_rate_ < 0.10, (
+            f"in-distribution embedding rejection rate too high: {report.rejection_rate_}"
+        )
