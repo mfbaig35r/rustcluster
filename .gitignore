@@ -35,7 +35,3 @@ Thumbs.db
 *.dylib
 *.dll
 *.whl
-notebooks/supplier_clustering_rustcluster.py
-notebooks/item_classification_s4_rustcluster.py
-notebooks/item_classification_s5_cluster_calculations_rustcluster.py
-notebooks/item_classification_s6_cluster_labeling_rustcluster.py
