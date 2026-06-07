@@ -874,8 +874,8 @@ mod python_bindings {
     // ---- Agglomerative ----
 
     use crate::agglomerative::{
-        run_agglomerative_with_metric, run_agglomerative_with_metric_f32, AgglomerativeState,
-        Cut, Linkage,
+        run_agglomerative_with_metric, run_agglomerative_with_metric_f32, AgglomerativeState, Cut,
+        Linkage,
     };
 
     enum AgglomerativeFitted {

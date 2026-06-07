@@ -88,9 +88,7 @@ pub fn run_agglomerative_with_metric(
         return Err(ClusterError::WardRequiresEuclidean);
     }
     match metric {
-        Metric::Euclidean => {
-            run_agglomerative_generic::<f64, SquaredEuclidean>(data, cut, linkage)
-        }
+        Metric::Euclidean => run_agglomerative_generic::<f64, SquaredEuclidean>(data, cut, linkage),
         Metric::Cosine => run_agglomerative_generic::<f64, CosineDistance>(data, cut, linkage),
         Metric::Manhattan => {
             run_agglomerative_generic::<f64, ManhattanDistance>(data, cut, linkage)
@@ -108,9 +106,7 @@ pub fn run_agglomerative_with_metric_f32(
         return Err(ClusterError::WardRequiresEuclidean);
     }
     match metric {
-        Metric::Euclidean => {
-            run_agglomerative_generic::<f32, SquaredEuclidean>(data, cut, linkage)
-        }
+        Metric::Euclidean => run_agglomerative_generic::<f32, SquaredEuclidean>(data, cut, linkage),
         Metric::Cosine => run_agglomerative_generic::<f32, CosineDistance>(data, cut, linkage),
         Metric::Manhattan => {
             run_agglomerative_generic::<f32, ManhattanDistance>(data, cut, linkage)
@@ -161,7 +157,10 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
     //
     // For Ward, store squared Euclidean; for others, store the metric distance.
     // The f64 round trip preserves sqrt() precision when F = f32.
-    let cm_len = n.checked_mul(n - 1).expect("n*(n-1) overflow in dist matrix size") / 2;
+    let cm_len = n
+        .checked_mul(n - 1)
+        .expect("n*(n-1) overflow in dist matrix size")
+        / 2;
     let mut dist_matrix: Vec<F> = vec![F::zero(); cm_len];
     for i in 0..n {
         let pi = &data_slice[i * d..(i + 1) * d];
@@ -267,8 +266,7 @@ fn run_agglomerative_generic<F: Scalar, D: Distance<F>>(
                     let new_dist = match linkage {
                         Linkage::Ward => {
                             let n_total = n_lo + n_hi + n_k;
-                            ((n_lo + n_k) * d_lo_k + (n_hi + n_k) * d_hi_k
-                                - n_k * merge_dist)
+                            ((n_lo + n_k) * d_lo_k + (n_hi + n_k) * d_hi_k - n_k * merge_dist)
                                 / n_total
                         }
                         Linkage::Complete => d_lo_k.max(d_hi_k),
@@ -418,9 +416,13 @@ mod tests {
             [10.1, 10.0],
             [10.0, 10.1],
         ];
-        let result =
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
-                .unwrap();
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(2),
+            Linkage::Ward,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert_eq!(result.labels.len(), 6);
         assert_eq!(result.n_clusters, 2);
         // First 3 should share a label, last 3 another
@@ -438,18 +440,26 @@ mod tests {
     #[test]
     fn test_single_cluster() {
         let data = array![[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]];
-        let result =
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(1), Linkage::Ward, Metric::Euclidean)
-                .unwrap();
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(1),
+            Linkage::Ward,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert!(result.labels.iter().all(|&l| l == 0));
     }
 
     #[test]
     fn test_n_equals_n_clusters() {
         let data = array![[0.0, 0.0], [10.0, 10.0], [20.0, 20.0]];
-        let result =
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(3), Linkage::Ward, Metric::Euclidean)
-                .unwrap();
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(3),
+            Linkage::Ward,
+            Metric::Euclidean,
+        )
+        .unwrap();
         let mut sorted = result.labels.clone();
         sorted.sort();
         assert_eq!(sorted, vec![0, 1, 2]);
@@ -458,9 +468,13 @@ mod tests {
     #[test]
     fn test_children_length() {
         let data = array![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [6.0, 0.0]];
-        let result =
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
-                .unwrap();
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(2),
+            Linkage::Ward,
+            Metric::Euclidean,
+        )
+        .unwrap();
         // n=4, target=2 → 2 merges
         assert_eq!(result.children.len(), 2);
         assert_eq!(result.distances.len(), 2);
@@ -469,9 +483,13 @@ mod tests {
     #[test]
     fn test_distances_non_decreasing() {
         let data = array![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [6.0, 0.0], [20.0, 0.0]];
-        let result =
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(1), Linkage::Ward, Metric::Euclidean)
-                .unwrap();
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(1),
+            Linkage::Ward,
+            Metric::Euclidean,
+        )
+        .unwrap();
         for w in result.distances.windows(2) {
             assert!(w[1] >= w[0] - 1e-10);
         }
@@ -480,9 +498,13 @@ mod tests {
     #[test]
     fn test_complete_linkage() {
         let data = array![[0.0, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0]];
-        let result =
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Complete, Metric::Euclidean)
-                .unwrap();
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(2),
+            Linkage::Complete,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert_eq!(result.labels[0], result.labels[1]);
         assert_eq!(result.labels[2], result.labels[3]);
         assert_ne!(result.labels[0], result.labels[2]);
@@ -491,9 +513,13 @@ mod tests {
     #[test]
     fn test_average_linkage() {
         let data = array![[0.0, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0]];
-        let result =
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Average, Metric::Euclidean)
-                .unwrap();
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(2),
+            Linkage::Average,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert_eq!(result.labels[0], result.labels[1]);
         assert_ne!(result.labels[0], result.labels[2]);
     }
@@ -501,9 +527,13 @@ mod tests {
     #[test]
     fn test_single_linkage() {
         let data = array![[0.0, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0]];
-        let result =
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Single, Metric::Euclidean)
-                .unwrap();
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(2),
+            Linkage::Single,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert_eq!(result.labels[0], result.labels[1]);
         assert_ne!(result.labels[0], result.labels[2]);
     }
@@ -512,7 +542,12 @@ mod tests {
     fn test_ward_requires_euclidean() {
         let data = array![[0.0, 0.0], [1.0, 1.0]];
         assert!(matches!(
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(1), Linkage::Ward, Metric::Cosine),
+            run_agglomerative_with_metric(
+                &data.view(),
+                Cut::NClusters(1),
+                Linkage::Ward,
+                Metric::Cosine
+            ),
             Err(ClusterError::WardRequiresEuclidean)
         ));
     }
@@ -520,18 +555,26 @@ mod tests {
     #[test]
     fn test_manhattan_metric() {
         let data = array![[0.0, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0]];
-        let result =
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Complete, Metric::Manhattan)
-                .unwrap();
+        let result = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(2),
+            Linkage::Complete,
+            Metric::Manhattan,
+        )
+        .unwrap();
         assert_eq!(result.labels[0], result.labels[1]);
     }
 
     #[test]
     fn test_f32() {
         let data = array![[0.0f32, 0.0], [0.1, 0.0], [10.0, 10.0], [10.1, 10.0],];
-        let result =
-            run_agglomerative_with_metric_f32(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
-                .unwrap();
+        let result = run_agglomerative_with_metric_f32(
+            &data.view(),
+            Cut::NClusters(2),
+            Linkage::Ward,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert_eq!(result.labels.len(), 4);
         assert_eq!(result.n_clusters, 2);
     }
@@ -540,7 +583,12 @@ mod tests {
     fn test_invalid_n_clusters() {
         let data = array![[0.0, 0.0], [1.0, 1.0]];
         assert!(matches!(
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(5), Linkage::Ward, Metric::Euclidean),
+            run_agglomerative_with_metric(
+                &data.view(),
+                Cut::NClusters(5),
+                Linkage::Ward,
+                Metric::Euclidean
+            ),
             Err(ClusterError::InvalidClusters { .. })
         ));
     }
@@ -549,7 +597,12 @@ mod tests {
     fn test_empty_input() {
         let data = Array2::<f64>::zeros((0, 2));
         assert!(matches!(
-            run_agglomerative_with_metric(&data.view(), Cut::NClusters(1), Linkage::Ward, Metric::Euclidean),
+            run_agglomerative_with_metric(
+                &data.view(),
+                Cut::NClusters(1),
+                Linkage::Ward,
+                Metric::Euclidean
+            ),
             Err(ClusterError::EmptyInput)
         ));
     }
@@ -557,10 +610,20 @@ mod tests {
     #[test]
     fn test_deterministic() {
         let data = array![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [6.0, 0.0]];
-        let r1 = run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
-            .unwrap();
-        let r2 = run_agglomerative_with_metric(&data.view(), Cut::NClusters(2), Linkage::Ward, Metric::Euclidean)
-            .unwrap();
+        let r1 = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(2),
+            Linkage::Ward,
+            Metric::Euclidean,
+        )
+        .unwrap();
+        let r2 = run_agglomerative_with_metric(
+            &data.view(),
+            Cut::NClusters(2),
+            Linkage::Ward,
+            Metric::Euclidean,
+        )
+        .unwrap();
         assert_eq!(r1.labels, r2.labels);
     }
 
