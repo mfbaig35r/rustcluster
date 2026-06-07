@@ -2,6 +2,9 @@
 /target/
 Cargo.lock
 
+# uv (Python package manager) — library, not app
+uv.lock
+
 # Python
 __pycache__/
 *.pyc
