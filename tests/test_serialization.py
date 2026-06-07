@@ -82,6 +82,19 @@ class TestHDBSCANPickle:
         m2 = pickle.loads(pickle.dumps(m))
         np.testing.assert_array_equal(m.cluster_persistence_, m2.cluster_persistence_)
 
+    def test_f32_fit_roundtrips_through_pickle(self, data):
+        # HDBSCAN's fitted state (labels, probabilities, cluster_persistence)
+        # is dtype-independent: labels are i64 and probabilities/persistence
+        # are f64 regardless of the input dtype. __setstate__ always reads
+        # the F64 variant, which is correct because the F type tag is
+        # PhantomData and HDBSCAN has no predict() that depends on it.
+        X = data.astype(np.float32)
+        m = HDBSCAN(min_cluster_size=5).fit(X)
+        m2 = pickle.loads(pickle.dumps(m))
+        np.testing.assert_array_equal(m.labels_, m2.labels_)
+        np.testing.assert_array_equal(m.probabilities_, m2.probabilities_)
+        np.testing.assert_array_equal(m.cluster_persistence_, m2.cluster_persistence_)
+
 
 class TestAgglomerativePickle:
     def test_roundtrip(self, data):

@@ -854,7 +854,12 @@ mod python_bindings {
                 let cluster_persistence: Vec<f64> =
                     state.get_item("cluster_persistence")?.unwrap().extract()?;
                 let n_clusters: usize = state.get_item("n_clusters")?.unwrap().extract()?;
-                // HDBSCAN state is dtype-independent (all f64), use F64 variant
+                // HDBSCAN's fitted state is dtype-independent: labels are i64
+                // and probabilities/persistence are f64 regardless of fit-time
+                // F. The F type tag is PhantomData and never reappears after
+                // fit (HDBSCAN has no predict() for out-of-sample assignment),
+                // so unpickling into the F64 variant is correct even when the
+                // original fit used f32. See test_f32_fit_roundtrips_through_pickle.
                 self.fitted = Some(HdbscanFitted::F64(HdbscanState {
                     labels,
                     probabilities,
