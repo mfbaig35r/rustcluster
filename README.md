@@ -143,7 +143,10 @@ report.global_mean_distance_  # compare to training baseline
 report.relative_drift_        # per-cluster drift
 report.kappa_drift_           # vMF concentration shift (spherical only, v2)
 report.direction_drift_       # centroid direction shift (spherical only, v2)
+report.rejection_rate_        # fraction of points beyond per-cluster bounds (requires calibrate())
 ```
+
+`rejection_rate_` is NaN until `snapshot.calibrate(X_train)` is called. The per-cluster bounds come from the calibration distribution, not the fit-time data.
 
 **Hierarchical slotting (v2):** Cascading snapshots for multi-level classification (e.g., commodity → sub-commodity):
 
