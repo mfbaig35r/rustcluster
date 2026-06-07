@@ -69,7 +69,9 @@ pub enum ClusterError {
     #[error("distance_threshold must be finite, got {0}")]
     InvalidDistanceThreshold(f64),
 
-    #[error("Exactly one of n_clusters and distance_threshold must be set; the other must be None")]
+    #[error(
+        "Exactly one of n_clusters and distance_threshold must be set; the other must be None"
+    )]
     AgglomerativeCutAmbiguous,
 
     // ---- Snapshot ----
