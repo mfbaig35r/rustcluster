@@ -10,9 +10,7 @@ pub mod fusion;
 pub mod normalize;
 pub mod reducer;
 pub mod reduction;
-pub mod spherical_hamerly;
 pub mod spherical_kmeans;
-pub mod spherical_minibatch;
 pub mod vmf;
 
 pub use spherical_kmeans::{run_spherical_kmeans, SphericalKMeansState};
