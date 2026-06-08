@@ -26,9 +26,9 @@ pytest tests/ -v                          # 192 Python tests
 rustcluster uses a **three-layer kernel** pattern. Every algorithm follows the same data flow:
 
 ```
-Layer 1: PyO3 boundary    src/lib.rs          — validates input, releases GIL, dispatches dtype (f32/f64)
-Layer 2: Algorithm logic   src/<algo>.rs       — iteration, convergence, ndarray types
-Layer 3: Hot kernel        src/utils.rs        — raw &[F] slices, auto-vectorized distance computation
+Layer 1: PyO3 boundary    src/lib.rs          (validates input, releases GIL, dispatches dtype f32/f64)
+Layer 2: Algorithm logic   src/<algo>.rs       (iteration, convergence, ndarray types)
+Layer 3: Hot kernel        src/utils.rs        (raw &[F] slices, auto-vectorized distance computation)
                            src/distance.rs
 ```
 
@@ -87,7 +87,7 @@ pub struct NewAlgoState<F: Scalar> {
     // ... other fitted attributes
 }
 
-// Public entry points — one per dtype, dispatching on Metric
+// Public entry points: one per dtype, dispatching on Metric
 pub fn run_new_algo_with_metric(
     data: &ArrayView2<f64>, /* params */
     metric: Metric,
@@ -231,7 +231,7 @@ impl Metric {
 
 Every `match metric { ... }` block in every algorithm's `run_*_with_metric` function and in `lib.rs` predict methods needs a new arm. Search for `Metric::Manhattan` to find all locations.
 
-### Step 4: Optional — KD-tree support
+### Step 4 (optional): KD-tree support
 
 If your metric supports axis-aligned bounding-box pruning, implement `BBoxDistance` in `src/kdtree.rs`:
 
@@ -253,9 +253,9 @@ And update `KdTree::should_use` to include the new metric.
 
 - **Rust**: `cargo fmt` for formatting, `cargo clippy --no-default-features --lib -- -D warnings` for linting
 - **No `unsafe`** unless absolutely necessary with justification
-- **No `panic = "abort"`** — let PyO3 translate panics to Python exceptions
+- **No `panic = "abort"`**, let PyO3 translate panics to Python exceptions
 - **Three-layer pattern**: hot kernels on raw `&[F]` slices, algorithm logic with ndarray, PyO3 at the boundary
-- **Python wrappers are thin** — all logic in Rust, Python handles input normalization and pickle delegation
+- **Python wrappers are thin**: all logic in Rust, Python handles input normalization and pickle delegation
 
 ## PR Process
 
@@ -276,5 +276,5 @@ And update `KdTree::should_use` to include the new metric.
 - Benchmark before and after changes to hot paths
 - Use `RUSTFLAGS="-C target-cpu=native" cargo bench` for local kernel benchmarks
 - Never bake `target-cpu=native` into distributed code
-- Keep distance kernels as simple counted loops — let LLVM auto-vectorize
-- Batch all work into a single Rust call — never cross the PyO3 boundary per-point
+- Keep distance kernels as simple counted loops so LLVM can auto-vectorize
+- Batch all work into a single Rust call; never cross the PyO3 boundary per-point

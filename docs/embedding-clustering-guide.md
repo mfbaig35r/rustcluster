@@ -21,7 +21,7 @@ print(model.objective_)        # sum of cosine similarities
 
 High-dimensional embeddings (768d–3072d) benefit from dimensionality reduction before clustering. You have three options:
 
-### Option A: Matryoshka — Skip PCA Entirely (Fastest)
+### Option A: Matryoshka, Skip PCA Entirely (Fastest)
 
 If you're generating **new** embeddings from a model that supports the `dimensions` parameter, request low-dimensional embeddings at API call time:
 
@@ -37,7 +37,7 @@ response = client.embeddings.create(
 embeddings_128d = np.array([e.embedding for e in response.data], dtype=np.float32)
 ```
 
-Then cluster directly — no PCA needed:
+Then cluster directly; no PCA needed:
 
 ```python
 model = EmbeddingCluster(n_clusters=50, reduction_dim=None)
@@ -46,7 +46,7 @@ model.fit(embeddings_128d)  # ~5s for 323K points
 
 **Supported models:** OpenAI text-embedding-3-small/large, Cohere embed-v3 (with `input_type`), and other Matryoshka-trained models.
 
-**When to use:** New projects where you control the embedding pipeline. Eliminates the PCA step entirely — reduction cost is 0s.
+**When to use:** New projects where you control the embedding pipeline. Eliminates the PCA step entirely; reduction cost is 0s.
 
 **Limitation:** Not all models support this. Can't retroactively request lower dimensions for existing embeddings stored in a database.
 
@@ -63,7 +63,7 @@ X_reduced = reducer.fit_transform(embeddings)  # slices first 128 cols + L2-norm
 
 This is instant (no fitting needed). It works because Matryoshka-trained models pack the most important information into the first dimensions. The L2 re-normalization preserves cosine geometry.
 
-### Option B: PCA — Works with Any Embeddings
+### Option B: PCA for Any Embeddings
 
 For embeddings from models that don't support Matryoshka, or existing 1536d data you can't re-embed, use randomized PCA:
 
@@ -78,7 +78,7 @@ PCA is the default. It works with any embedding model but the matrix factorizati
 
 ### Option C: No Reduction
 
-If your embeddings are already low-dimensional (≤256d) — either from Matryoshka, a smaller model, or pre-reduced data:
+If your embeddings are already low-dimensional (≤256d), either from Matryoshka, a smaller model, or pre-reduced data:
 
 ```python
 model = EmbeddingCluster(n_clusters=50, reduction_dim=None)
@@ -114,7 +114,7 @@ For production pipelines where new data arrives:
 # Save the fitted PCA model (1.5 KB)
 reducer.save("pca_128.bin")
 
-# Later — load and project new embeddings (~5s for 323K points)
+# Later: load and project new embeddings (~5s for 323K points)
 reducer = EmbeddingReducer.load("pca_128.bin")
 X_new_reduced = reducer.transform(new_embeddings)
 ```
@@ -142,7 +142,7 @@ from rustcluster import KMeans, DBSCAN, HDBSCAN, AgglomerativeClustering
 
 X_reduced = np.load("reduced_128.npy")
 
-# Use metric="cosine" — the data is L2-normalized after reduction
+# Use metric="cosine"; the data is L2-normalized after reduction
 KMeans(n_clusters=50, metric="cosine").fit(X_reduced)
 DBSCAN(eps=0.5, metric="cosine").fit(X_reduced)
 HDBSCAN(min_cluster_size=100, metric="cosine").fit(X_reduced)
@@ -172,7 +172,7 @@ Measured on 323,308 CROSS ruling embeddings (text-embedding-3-small, 1536d → 1
 | Workflow | Time | vs Baseline |
 |----------|------|-------------|
 | EmbeddingCluster end-to-end (PCA every run) | 618s | 1x |
-| EmbeddingReducer first run (fit_transform + save) | 615s | — |
+| EmbeddingReducer first run (fit_transform + save) | 615s | n/a |
 | Subsequent run (load cached .npy + cluster) | **7.5s** | **82x faster** |
 | 5 clustering configs on cached data | 74s | 42x vs 5× baseline |
 | Matryoshka 128d from API (no PCA at all) | **~5s** | **~120x faster** |
@@ -220,9 +220,74 @@ for k in [20, 50, 98, 150, 200]:
 
 Lower BIC is better (penalizes model complexity).
 
+## Memory-Constrained Workflows (v0.7.0+)
+
+For large embedding datasets on memory-constrained drivers (e.g. a 28 GB Databricks node), three EmbeddingReducer features compose to bring peak Python memory under ~3 GB on the 312K x 1536d workload.
+
+### `chunk_size`: bounded per-call working set
+
+```python
+X = reducer.transform(embeddings, chunk_size=50_000)
+X = reducer.fit_transform(embeddings, chunk_size=50_000)
+```
+
+Per-chunk centered matrix is the only one live at any moment. For 312K x 1536, a 50K chunk caps the centered matrix at ~300 MB (f32) instead of ~1.9 GB. Matryoshka skips chunking (it's a column slice; overhead would dominate).
+
+### `fit_sample_size`: sample-based PCA fit
+
+```python
+reducer = EmbeddingReducer(target_dim=128, fit_sample_size=50_000)
+reducer.fit(embeddings)  # internally samples to 50K rows
+```
+
+PCA's principal directions stabilize well before n_samples reaches dataset size. Sampling uses `random_state` for reproducibility. Pass through to `fit_transform` as well; the chunked transform still operates on the full input.
+
+### `dtype=float32`: f32 fast path
+
+Pass a float32 array and the reducer runs PCA entirely in f32. The n*d centered matrix stays in f32, halving working-set memory. **Output dtype tracks input dtype** as of v0.7.0:
+
+```python
+embeddings_f32 = embeddings.astype(np.float32)
+X = reducer.fit_transform(embeddings_f32)  # X is float32
+```
+
+(Prior to v0.7.0, output was always upcast to float64. If you relied on the upcast, add an explicit `.astype(np.float64)` after `.transform()`.)
+
+### Loading from Spark with no list-of-lists overhead
+
+`toPandas()` on a DataFrame with a 1536d embedding column materializes each row as a Python list of Python floats before NumPy conversion, costing ~3 GB on 312K rows. `extract_embeddings_from_spark` streams via `toLocalIterator()` directly into a pre-allocated NumPy array:
+
+```python
+from rustcluster.utils import extract_embeddings_from_spark
+
+embeddings, pdf = extract_embeddings_from_spark(
+    df,
+    embedding_col="embedding",
+    metadata_cols=["supplier_id", "commodity"],
+    dtype=np.float32,
+    sample_n=None,
+)
+```
+
+### End-to-end memory-conscious workflow
+
+```python
+from rustcluster.utils import extract_embeddings_from_spark
+from rustcluster.experimental import EmbeddingReducer, EmbeddingCluster
+
+embeddings, pdf = extract_embeddings_from_spark(
+    df, "embedding", ["supplier_id", "commodity"], dtype=np.float32
+)
+reducer = EmbeddingReducer(target_dim=128, fit_sample_size=50_000)
+X = reducer.fit_transform(embeddings, chunk_size=50_000)
+model = EmbeddingCluster(n_clusters=20, reduction_dim=None).fit(X)
+```
+
+Total Python peak on 312K x 1536d: ~1.5-3 GB, down from ~8-9 GB before v0.7.0.
+
 ## Tips
 
-- **Always use f32 for embeddings.** No quality loss vs f64, half the memory.
+- **Always use f32 for embeddings.** No quality loss vs f64, half the memory, and the f32 fast path in v0.7.0+ keeps it f32 end-to-end.
 - **128d is a good default reduction target.** Below 64 you lose information, above 256 PCA gains diminish.
 - **Use `metric="cosine"` when clustering reduced data.** The data is L2-normalized after reduction, so cosine distance is the natural metric.
 - **Start with n_init=1 for exploration, increase to 3-5 for final results.** Each init re-runs K-means from scratch.
