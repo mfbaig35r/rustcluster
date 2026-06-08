@@ -2067,16 +2067,30 @@ mod python_bindings {
         }
 
         fn fit(&mut self, py: Python<'_>, x: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
-            let (data_f64, n, d) = extract_f64_2d(x)?;
+            // Dispatch on input dtype so an f32 input fits via the f32 fast
+            // path (n*d centered matrix stays in f32, halving the working
+            // set). Storage on the resulting state is always f64.
             let target_dim = self.target_dim;
             let seed = self.seed;
             let method = self.method.clone();
 
-            let state = py.allow_threads(move || match method.as_str() {
-                "pca" => reducer::fit_pca(&data_f64, n, d, target_dim, seed),
-                "matryoshka" => reducer::fit_matryoshka(d, target_dim),
-                _ => unreachable!(),
-            });
+            let state = if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+                let view = arr.as_array();
+                let (n, d) = view.dim();
+                let data: Vec<f32> = view.as_slice().expect("contiguous").to_vec();
+                py.allow_threads(move || match method.as_str() {
+                    "pca" => reducer::fit_pca_f32(&data, n, d, target_dim, seed),
+                    "matryoshka" => reducer::fit_matryoshka(d, target_dim),
+                    _ => unreachable!(),
+                })
+            } else {
+                let (data_f64, n, d) = extract_f64_2d(x)?;
+                py.allow_threads(move || match method.as_str() {
+                    "pca" => reducer::fit_pca(&data_f64, n, d, target_dim, seed),
+                    "matryoshka" => reducer::fit_matryoshka(d, target_dim),
+                    _ => unreachable!(),
+                })
+            };
 
             self.state = Some(state);
             Ok(())
@@ -2086,17 +2100,42 @@ mod python_bindings {
             &self,
             py: Python<'py>,
             x: &Bound<'_, pyo3::types::PyAny>,
-        ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        ) -> PyResult<PyObject> {
             let state = self.state.as_ref().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Call fit() before transform()")
             })?;
-            let (data_f64, n, d) = extract_f64_2d(x)?;
             let state_method = state.method.clone();
             let state_input_dim = state.input_dim;
             let state_target_dim = state.target_dim;
             let state_mean = state.mean.clone();
             let state_components = state.components.clone();
+            let target = state.target_dim;
 
+            // f32 fast path: keep centered matrix in f32, return PyArray2<f32>.
+            if let Ok(arr) = x.extract::<PyReadonlyArray2<'_, f32>>() {
+                let view = arr.as_array();
+                let (n, d) = view.dim();
+                let data: Vec<f32> = view.as_slice().expect("contiguous").to_vec();
+                let result = py
+                    .allow_threads(move || {
+                        let st = reducer::EmbeddingReducerState {
+                            method: state_method,
+                            input_dim: state_input_dim,
+                            target_dim: state_target_dim,
+                            mean: state_mean,
+                            components: state_components,
+                        };
+                        reducer::transform_f32(&data, n, d, &st)
+                    })
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+                let n_out = result.len() / target;
+                let arr = ndarray::Array2::from_shape_vec((n_out, target), result)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+                return Ok(PyArray2::from_owned_array(py, arr).into_any().unbind());
+            }
+
+            // f64 path (also handles non-f32 inputs that coerce to f64).
+            let (data_f64, n, d) = extract_f64_2d(x)?;
             let result = py
                 .allow_threads(move || {
                     let st = reducer::EmbeddingReducerState {
@@ -2110,18 +2149,17 @@ mod python_bindings {
                 })
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
 
-            let target = self.state.as_ref().unwrap().target_dim;
             let n_out = result.len() / target;
             let arr = ndarray::Array2::from_shape_vec((n_out, target), result)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-            Ok(PyArray2::from_owned_array(py, arr))
+            Ok(PyArray2::from_owned_array(py, arr).into_any().unbind())
         }
 
         fn fit_transform<'py>(
             &mut self,
             py: Python<'py>,
             x: &Bound<'_, pyo3::types::PyAny>,
-        ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        ) -> PyResult<PyObject> {
             self.fit(py, x)?;
             self.transform(py, x)
         }

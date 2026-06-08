@@ -13,7 +13,9 @@ use rand::SeedableRng;
 use rayon::prelude::*;
 
 use super::normalize;
-use super::reduction::{compute_pca, project_data, PcaProjection};
+use super::reduction::{
+    compute_pca, compute_pca_f32, project_data, project_data_f32, PcaProjection,
+};
 
 /// Magic bytes for the binary format: "RCPC" (RustCluster PCA).
 const MAGIC: [u8; 4] = *b"RCPC";
@@ -44,6 +46,32 @@ pub fn fit_pca(
 ) -> EmbeddingReducerState {
     let mut rng = StdRng::seed_from_u64(seed);
     let proj = compute_pca(data, n, d, target_dim, 10, &mut rng);
+    EmbeddingReducerState {
+        method: "pca".to_string(),
+        input_dim: proj.input_dim,
+        target_dim: proj.output_dim,
+        mean: proj.mean,
+        components: proj.components,
+    }
+}
+
+/// f32 fast-path for fitting PCA. Keeps the n*d centered matrix in f32
+/// during the random projection and SVD steps, then upcasts the small
+/// components and mean to f64 for canonical storage.
+///
+/// Used by the PyO3 layer when the caller passes a float32 array. The
+/// returned state is interchangeable with the f64 path for transform
+/// dispatch and save/load.
+pub fn fit_pca_f32(
+    data: &[f32],
+    n: usize,
+    d: usize,
+    target_dim: usize,
+    seed: u64,
+) -> EmbeddingReducerState {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let proj_f32 = compute_pca_f32(data, n, d, target_dim, 10, &mut rng);
+    let proj = proj_f32.to_f64();
     EmbeddingReducerState {
         method: "pca".to_string(),
         input_dim: proj.input_dim,
@@ -103,6 +131,50 @@ pub fn transform(
     };
 
     // L2 re-normalize rows
+    normalize::l2_normalize_rows_inplace(&mut result, n, target);
+    Ok(result)
+}
+
+/// f32 fast-path for transform. Downcasts the stored f64 projection
+/// (`mean` + `components`, ~750 KB at d=1536) to f32 once and runs the
+/// hot n*d centering + matmul in f32, halving the working-set memory.
+///
+/// `data` and the output are both f32. Output is L2-normalized in place.
+pub fn transform_f32(
+    data: &[f32],
+    n: usize,
+    d: usize,
+    state: &EmbeddingReducerState,
+) -> Result<Vec<f32>, String> {
+    if d != state.input_dim {
+        return Err(format!(
+            "Input has {} features, expected {}",
+            d, state.input_dim
+        ));
+    }
+
+    let target = state.target_dim;
+    let mut result = match state.method.as_str() {
+        "pca" => {
+            let proj_f64 = PcaProjection {
+                components: state.components.clone(),
+                mean: state.mean.clone(),
+                input_dim: state.input_dim,
+                output_dim: state.target_dim,
+            };
+            let proj_f32 = proj_f64.to_f32();
+            project_data_f32(data, n, &proj_f32)
+        }
+        "matryoshka" => {
+            let mut truncated = Vec::with_capacity(n * target);
+            for i in 0..n {
+                truncated.extend_from_slice(&data[i * d..i * d + target]);
+            }
+            truncated
+        }
+        other => return Err(format!("Unknown method: {}", other)),
+    };
+
     normalize::l2_normalize_rows_inplace(&mut result, n, target);
     Ok(result)
 }
