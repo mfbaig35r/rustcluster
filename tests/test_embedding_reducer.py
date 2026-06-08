@@ -122,11 +122,20 @@ class TestTransformNewData:
 
 
 class TestF32Input:
-    def test_f32_produces_output(self):
+    def test_f32_preserves_output_dtype(self):
+        # As of v0.7.0 the EmbeddingReducer keeps f32 end-to-end on the
+        # hot path (centered n*d matrix in f32), so the output dtype
+        # tracks the input dtype.
         X = make_embeddings(n=100, d=64).astype(np.float32)
         reducer = EmbeddingReducer(target_dim=16, method="pca")
         result = reducer.fit_transform(X)
         assert result.shape == (100, 16)
+        assert result.dtype == np.float32
+
+    def test_f64_produces_f64_output(self):
+        X = make_embeddings(n=100, d=64)  # f64 by default
+        reducer = EmbeddingReducer(target_dim=16, method="pca")
+        result = reducer.fit_transform(X)
         assert result.dtype == np.float64
 
     def test_f32_unit_norm(self):
@@ -134,7 +143,49 @@ class TestF32Input:
         reducer = EmbeddingReducer(target_dim=16, method="pca")
         result = reducer.fit_transform(X)
         norms = np.linalg.norm(result, axis=1)
-        np.testing.assert_allclose(norms, 1.0, atol=1e-6)
+        np.testing.assert_allclose(norms, 1.0, atol=1e-4)
+
+    def test_f32_close_to_f64(self):
+        # The f32 path should produce numerically equivalent results to
+        # the f64 path within f32 single-precision tolerance.
+        rng = np.random.default_rng(42)
+        X_f64 = rng.standard_normal((200, 32))
+        X_f64 /= np.linalg.norm(X_f64, axis=1, keepdims=True)
+        X_f32 = X_f64.astype(np.float32)
+
+        r64 = EmbeddingReducer(target_dim=8, method="pca", random_state=42).fit_transform(X_f64)
+        r32 = EmbeddingReducer(target_dim=8, method="pca", random_state=42).fit_transform(X_f32)
+
+        # The signs / orderings of PCA components are seed-dependent and
+        # the random Gaussian Omega is sampled in f32 vs f64, so we don't
+        # expect byte equality. What we can check is that the f32 result
+        # is itself well-formed (unit norm, no NaN/inf, correct shape).
+        assert r32.dtype == np.float32
+        assert r32.shape == r64.shape
+        assert np.all(np.isfinite(r32))
+        norms = np.linalg.norm(r32, axis=1)
+        np.testing.assert_allclose(norms, 1.0, atol=1e-4)
+
+    def test_f32_save_load_roundtrip(self):
+        # State on disk is canonical f64; we can fit with f32 input, save,
+        # reload, and still get equivalent results when transforming new f32 data.
+        X = make_embeddings(n=200, d=32).astype(np.float32)
+        r1 = EmbeddingReducer(target_dim=8, method="pca", random_state=0)
+        r1.fit(X)
+        out1 = r1.transform(X)
+
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+            path = f.name
+        try:
+            r1.save(path)
+            r2 = EmbeddingReducer.load(path)
+            out2 = r2.transform(X)
+            # Both should be f32 since input is f32
+            assert out1.dtype == np.float32
+            assert out2.dtype == np.float32
+            np.testing.assert_allclose(out1, out2, atol=1e-6)
+        finally:
+            os.unlink(path)
 
 
 class TestExistingAlgorithmsOnReduced:

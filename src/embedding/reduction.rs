@@ -157,6 +157,204 @@ fn faer_to_flat_row_major(mat: &Mat<f64>) -> Vec<f64> {
     out
 }
 
+// ---- f32 PCA path ----
+//
+// Same algorithm as the f64 path above; the only difference is that the
+// n*d centered matrix is kept in f32, which halves the working-set
+// memory for the hot stage of fit and transform. Stored projection
+// components are still f64 (canonical storage; PcaProjectionF32 is
+// returned by the fit and converted before being written to a reducer
+// state, so save format stays unchanged).
+
+/// f32-storage variant of [`PcaProjection`], used by the f32 fit/transform
+/// fast path. Convert with `to_f64()` before storing in long-lived state.
+#[derive(Debug, Clone)]
+pub struct PcaProjectionF32 {
+    pub components: Vec<f32>,
+    pub mean: Vec<f32>,
+    pub input_dim: usize,
+    pub output_dim: usize,
+}
+
+impl PcaProjectionF32 {
+    /// Upcast to the canonical f64 [`PcaProjection`].
+    ///
+    /// Used by the fit path so that the on-disk state and the EmbeddingCluster
+    /// pickle stay f64, regardless of the dtype the fit ran in. The 750 KB or
+    /// so of components is negligible compared to the n*d working set.
+    pub fn to_f64(&self) -> PcaProjection {
+        PcaProjection {
+            components: self.components.iter().map(|&v| v as f64).collect(),
+            mean: self.mean.iter().map(|&v| v as f64).collect(),
+            input_dim: self.input_dim,
+            output_dim: self.output_dim,
+        }
+    }
+}
+
+impl PcaProjection {
+    /// Downcast a stored f64 projection to f32 for an f32 transform path.
+    ///
+    /// The cost is one-time at transform start (mean + components: ~750 KB
+    /// at d=1536, target=128). The win is the n*d centered matrix that
+    /// follows, which stays in f32.
+    pub fn to_f32(&self) -> PcaProjectionF32 {
+        PcaProjectionF32 {
+            components: self.components.iter().map(|&v| v as f32).collect(),
+            mean: self.mean.iter().map(|&v| v as f32).collect(),
+            input_dim: self.input_dim,
+            output_dim: self.output_dim,
+        }
+    }
+}
+
+/// f32 mirror of [`compute_pca`]; see that function for algorithmic detail.
+pub fn compute_pca_f32(
+    data: &[f32],
+    n: usize,
+    d: usize,
+    target_dim: usize,
+    oversampling: usize,
+    rng: &mut StdRng,
+) -> PcaProjectionF32 {
+    let k = (target_dim + oversampling).min(d).min(n);
+
+    // Step 1: Column means (kept in f64 for accumulation accuracy, cast to f32 at end)
+    let mut mean_f64 = vec![0.0f64; d];
+    for i in 0..n {
+        for j in 0..d {
+            mean_f64[j] += data[i * d + j] as f64;
+        }
+    }
+    for j in 0..d {
+        mean_f64[j] /= n as f64;
+    }
+    let mean: Vec<f32> = mean_f64.iter().map(|&v| v as f32).collect();
+
+    // Step 2: Gaussian Omega
+    let normal = StandardNormal;
+    let omega: Vec<f32> = (0..d * k)
+        .map(|_| {
+            let v: f64 = normal.sample(rng);
+            v as f32
+        })
+        .collect();
+
+    // Step 3: Y = (X - mean) * Omega, shape (n, k), all in f32
+    let x_centered = Mat::<f32>::from_fn(n, d, |i, j| data[i * d + j] - mean[j]);
+    let omega_mat = Mat::<f32>::from_fn(d, k, |i, j| omega[i * k + j]);
+    let y_mat = &x_centered * &omega_mat;
+
+    // Step 4: Thin QR of Y (modified Gram-Schmidt in f32)
+    let y_flat = faer_to_flat_row_major_f32(&y_mat);
+    let q_flat = qr_thin_q_f32(&y_flat, n, k);
+
+    // Step 5: B = Q^T * X_centered, shape (k, d)
+    let q_mat = Mat::<f32>::from_fn(n, k, |i, j| q_flat[i * k + j]);
+    let b_mat = q_mat.transpose() * &x_centered;
+
+    // Step 6: Thin SVD of B
+    let svd = b_mat
+        .thin_svd()
+        .expect("SVD of small matrix should not fail");
+    let actual_dim = target_dim.min(k);
+    let v = svd.V();
+    let mut components = vec![0.0f32; d * actual_dim];
+    for j in 0..d {
+        for comp in 0..actual_dim {
+            components[j * actual_dim + comp] = v[(j, comp)];
+        }
+    }
+
+    PcaProjectionF32 {
+        components,
+        mean,
+        input_dim: d,
+        output_dim: actual_dim,
+    }
+}
+
+/// f32 mirror of [`project_data`].
+///
+/// Takes an already-f32 projection (use `PcaProjection::to_f32` to obtain
+/// one from canonical f64 storage). Keeps the n*d centered matrix in f32.
+pub fn project_data_f32(data: &[f32], n: usize, projection: &PcaProjectionF32) -> Vec<f32> {
+    let d = projection.input_dim;
+    let target = projection.output_dim;
+
+    if n >= 1000 {
+        let x_centered = Mat::<f32>::from_fn(n, d, |i, j| data[i * d + j] - projection.mean[j]);
+        let comp_mat = Mat::<f32>::from_fn(d, target, |i, j| projection.components[i * target + j]);
+        let result_mat = &x_centered * &comp_mat;
+
+        let mut out = vec![0.0f32; n * target];
+        for i in 0..n {
+            for j in 0..target {
+                out[i * target + j] = result_mat[(i, j)];
+            }
+        }
+        out
+    } else {
+        // Small n: avoid faer allocation overhead.
+        let mut out = vec![0.0f32; n * target];
+        out.par_chunks_mut(target)
+            .enumerate()
+            .for_each(|(i, out_row)| {
+                for col in 0..target {
+                    let mut acc = 0.0f32;
+                    for j in 0..d {
+                        let val = data[i * d + j] - projection.mean[j];
+                        acc += val * projection.components[j * target + col];
+                    }
+                    out_row[col] = acc;
+                }
+            });
+        out
+    }
+}
+
+/// Convert a faer Mat<f32> to flat row-major Vec<f32>.
+fn faer_to_flat_row_major_f32(mat: &Mat<f32>) -> Vec<f32> {
+    let (m, n) = (mat.nrows(), mat.ncols());
+    let mut out = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            out[i * n + j] = mat[(i, j)];
+        }
+    }
+    out
+}
+
+/// f32 mirror of `qr_thin_q`.
+fn qr_thin_q_f32(a: &[f32], n: usize, k: usize) -> Vec<f32> {
+    let mut q = a.to_vec();
+    for col in 0..k {
+        for prev in 0..col {
+            let mut dot = 0.0f32;
+            for row in 0..n {
+                dot += q[row * k + col] * q[row * k + prev];
+            }
+            for row in 0..n {
+                q[row * k + col] -= dot * q[row * k + prev];
+            }
+        }
+        let mut norm_sq = 0.0f32;
+        for row in 0..n {
+            norm_sq += q[row * k + col] * q[row * k + col];
+        }
+        let norm = norm_sq.sqrt();
+        if norm > 1e-15 {
+            let inv = 1.0 / norm;
+            for row in 0..n {
+                q[row * k + col] *= inv;
+            }
+        }
+    }
+    q
+}
+
+// ---- end f32 PCA path ----
+
 /// Thin QR decomposition via modified Gram-Schmidt.
 /// Input: A (n x k), flat row-major.
 /// Returns Q (n x k), flat row-major, columns orthonormal.
