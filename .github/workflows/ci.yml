@@ -27,7 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install build tools
-        run: pip install maturin numpy pytest
+        run: pip install maturin numpy pytest pandas
 
       - name: Rust tests
         run: cargo test --no-default-features --lib
