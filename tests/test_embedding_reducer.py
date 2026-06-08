@@ -248,3 +248,63 @@ class TestChunkedTransform:
         full = reducer.transform(X)
         chunked = reducer.transform(X, chunk_size=50)
         np.testing.assert_array_equal(full, chunked)
+
+
+class TestFitSampleSize:
+    def test_fit_sample_size_uses_subset(self):
+        # Larger n so sampling is exercised
+        X = make_embeddings(n=500, d=32)
+        # With sample_size=100, fit should only see 100 rows
+        reducer = EmbeddingReducer(
+            target_dim=8,
+            method="pca",
+            random_state=42,
+            fit_sample_size=100,
+        )
+        reducer.fit(X)
+        # The reducer is still usable on the full input
+        result = reducer.transform(X)
+        assert result.shape == (500, 8)
+        # Output is unit-norm
+        norms = np.linalg.norm(result, axis=1)
+        np.testing.assert_allclose(norms, 1.0, atol=1e-6)
+
+    def test_fit_sample_size_reproducible(self):
+        X = make_embeddings(n=500, d=32)
+        r1 = EmbeddingReducer(target_dim=8, method="pca", random_state=42, fit_sample_size=100)
+        r2 = EmbeddingReducer(target_dim=8, method="pca", random_state=42, fit_sample_size=100)
+        out1 = r1.fit_transform(X)
+        out2 = r2.fit_transform(X)
+        np.testing.assert_allclose(out1, out2, atol=1e-10)
+
+    def test_fit_sample_size_larger_than_n_is_noop(self):
+        X = make_embeddings(n=50, d=32)
+        # fit_sample_size > n means we still fit on all 50 rows
+        r1 = EmbeddingReducer(target_dim=8, method="pca", random_state=0, fit_sample_size=10_000)
+        r2 = EmbeddingReducer(target_dim=8, method="pca", random_state=0)
+        out1 = r1.fit_transform(X)
+        out2 = r2.fit_transform(X)
+        np.testing.assert_allclose(out1, out2, atol=1e-10)
+
+    def test_fit_sample_size_with_chunking(self):
+        X = make_embeddings(n=500, d=32)
+        # Combine sample-fit + chunked transform
+        reducer = EmbeddingReducer(
+            target_dim=8,
+            method="pca",
+            random_state=7,
+            fit_sample_size=100,
+        )
+        result = reducer.fit_transform(X, chunk_size=50)
+        assert result.shape == (500, 8)
+
+    def test_fit_sample_size_ignored_for_matryoshka(self):
+        # Matryoshka's fit is a no-op; sample_size should be quietly ignored
+        X = make_embeddings(n=200, d=64)
+        reducer = EmbeddingReducer(
+            target_dim=16,
+            method="matryoshka",
+            fit_sample_size=10,
+        )
+        result = reducer.fit_transform(X)
+        assert result.shape == (200, 16)

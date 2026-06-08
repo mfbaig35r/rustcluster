@@ -190,9 +190,17 @@ class EmbeddingReducer:
         Reduction method: "pca" (randomized PCA) or "matryoshka" (prefix truncation).
     random_state : int, default=0
         Seed for reproducibility (PCA only).
+    fit_sample_size : int or None, default=None
+        If set and the fit input has more than `fit_sample_size` rows,
+        the reducer fits on a random subsample of this size. PCA's
+        principal directions stabilize well before n_samples reaches
+        the dataset size, so sampling cuts fit memory and time without
+        meaningfully changing the projection. Uses `random_state` for
+        reproducible subsampling. Matryoshka ignores this parameter
+        (fit is a no-op).
     """
 
-    def __init__(self, target_dim=128, method="pca", random_state=0):
+    def __init__(self, target_dim=128, method="pca", random_state=0, fit_sample_size=None):
         self._model = _RustEmbeddingReducer(
             target_dim=target_dim,
             method=method,
@@ -200,6 +208,8 @@ class EmbeddingReducer:
         )
         self._target_dim = target_dim
         self._method = method
+        self._random_state = random_state
+        self._fit_sample_size = fit_sample_size
 
     def fit(self, X):
         """Fit the reducer on embedding data.
@@ -214,7 +224,16 @@ class EmbeddingReducer:
         self
         """
         X = _prepare(X)
-        self._model.fit(X)
+        if (
+            self._fit_sample_size is not None
+            and self._method == "pca"
+            and len(X) > self._fit_sample_size
+        ):
+            rng = np.random.default_rng(self._random_state)
+            sample_idx = rng.choice(len(X), self._fit_sample_size, replace=False)
+            self._model.fit(X[sample_idx])
+        else:
+            self._model.fit(X)
         return self
 
     def transform(self, X, chunk_size=None):
@@ -262,14 +281,20 @@ class EmbeddingReducer:
             L2-normalized reduced embeddings.
         """
         X = _prepare(X)
-        if chunk_size is None or self._method == "matryoshka" or len(X) <= chunk_size:
+        # When fit_sample_size kicks in, we can no longer use the Rust
+        # fit_transform fast-path (it would also transform the sampled
+        # subset). Fall through to fit() (which samples) + transform().
+        wants_sample = (
+            self._fit_sample_size is not None
+            and self._method == "pca"
+            and len(X) > self._fit_sample_size
+        )
+        if not wants_sample and (
+            chunk_size is None or self._method == "matryoshka" or len(X) <= chunk_size
+        ):
             return np.asarray(self._model.fit_transform(X))
-        self._model.fit(X)
-        chunks = [
-            np.asarray(self._model.transform(X[start:start + chunk_size]))
-            for start in range(0, len(X), chunk_size)
-        ]
-        return np.vstack(chunks)
+        self.fit(X)
+        return self.transform(X, chunk_size=chunk_size)
 
     def save(self, path):
         """Save fitted state to a binary file.
