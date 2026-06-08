@@ -2,7 +2,7 @@
 /target/
 Cargo.lock
 
-# uv (Python package manager) — library, not app
+# uv (Python package manager); library, not app
 uv.lock
 
 # Python
@@ -35,3 +35,6 @@ Thumbs.db
 *.dylib
 *.dll
 *.whl
+
+# Local archive for historical planning/research docs (see commit history)
+docs/archive/
