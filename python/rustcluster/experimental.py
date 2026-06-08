@@ -217,13 +217,19 @@ class EmbeddingReducer:
         self._model.fit(X)
         return self
 
-    def transform(self, X):
+    def transform(self, X, chunk_size=None):
         """Transform data using the fitted reducer.
 
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
             Embedding vectors (must have same n_features as fit data).
+        chunk_size : int or None, default=None
+            If set, process the input in chunks of this many rows and
+            concatenate the results. Keeps peak working memory bounded
+            to one chunk's worth of intermediate matrices, which matters
+            for large embedding datasets on memory-constrained drivers.
+            Matryoshka reduction skips chunking (it is a pure column slice).
 
         Returns
         -------
@@ -231,15 +237,24 @@ class EmbeddingReducer:
             L2-normalized reduced embeddings.
         """
         X = _prepare(X)
-        return np.asarray(self._model.transform(X))
+        if chunk_size is None or self._method == "matryoshka" or len(X) <= chunk_size:
+            return np.asarray(self._model.transform(X))
+        chunks = [
+            np.asarray(self._model.transform(X[start:start + chunk_size]))
+            for start in range(0, len(X), chunk_size)
+        ]
+        return np.vstack(chunks)
 
-    def fit_transform(self, X):
+    def fit_transform(self, X, chunk_size=None):
         """Fit and transform in one call.
 
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
             Embedding vectors.
+        chunk_size : int or None, default=None
+            If set, fit on the full input and then transform in chunks of
+            this many rows. See `transform` for details.
 
         Returns
         -------
@@ -247,7 +262,14 @@ class EmbeddingReducer:
             L2-normalized reduced embeddings.
         """
         X = _prepare(X)
-        return np.asarray(self._model.fit_transform(X))
+        if chunk_size is None or self._method == "matryoshka" or len(X) <= chunk_size:
+            return np.asarray(self._model.fit_transform(X))
+        self._model.fit(X)
+        chunks = [
+            np.asarray(self._model.transform(X[start:start + chunk_size]))
+            for start in range(0, len(X), chunk_size)
+        ]
+        return np.vstack(chunks)
 
     def save(self, path):
         """Save fitted state to a binary file.
