@@ -213,3 +213,38 @@ class TestErrors:
         reducer.fit(X_train)
         with pytest.raises(ValueError):
             reducer.transform(X_bad)
+
+
+class TestChunkedTransform:
+    def test_chunked_transform_matches_unchunked(self):
+        X = make_embeddings(n=500, d=64)
+        reducer = EmbeddingReducer(target_dim=16, method="pca")
+        reducer.fit(X)
+        full = reducer.transform(X)
+        chunked = reducer.transform(X, chunk_size=100)
+        np.testing.assert_allclose(full, chunked, atol=1e-10)
+
+    def test_chunked_fit_transform_matches_unchunked(self):
+        X = make_embeddings(n=500, d=64)
+        reducer1 = EmbeddingReducer(target_dim=16, method="pca", random_state=42)
+        reducer2 = EmbeddingReducer(target_dim=16, method="pca", random_state=42)
+        full = reducer1.fit_transform(X)
+        chunked = reducer2.fit_transform(X, chunk_size=100)
+        np.testing.assert_allclose(full, chunked, atol=1e-10)
+
+    def test_chunk_size_larger_than_n_is_noop(self):
+        X = make_embeddings(n=50, d=64)
+        reducer = EmbeddingReducer(target_dim=16, method="pca")
+        reducer.fit(X)
+        result = reducer.transform(X, chunk_size=10_000)
+        assert result.shape == (50, 16)
+
+    def test_chunked_matryoshka_skips_chunking(self):
+        X = make_embeddings(n=200, d=64)
+        reducer = EmbeddingReducer(target_dim=16, method="matryoshka")
+        reducer.fit(X)
+        # Matryoshka is a column slice, chunking is overhead. Should still
+        # produce the same result whether chunk_size is set or not.
+        full = reducer.transform(X)
+        chunked = reducer.transform(X, chunk_size=50)
+        np.testing.assert_array_equal(full, chunked)
