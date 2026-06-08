@@ -20,6 +20,7 @@ from rustcluster._rustcluster import (
 
 from rustcluster.snapshot import ClusterSnapshot
 from rustcluster import index
+from rustcluster import utils
 
 __all__ = [
     "KMeans",
@@ -31,6 +32,7 @@ __all__ = [
     "IndexFlatL2",
     "IndexFlatIP",
     "index",
+    "utils",
     "silhouette_score",
     "calinski_harabasz_score",
     "davies_bouldin_score",
