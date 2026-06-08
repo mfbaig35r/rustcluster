@@ -5,17 +5,19 @@ Fast, Rust-backed clustering for Python. Six algorithms, sklearn-compatible API,
 ## Highlights
 
 - **6 algorithms**: KMeans, MiniBatchKMeans, DBSCAN, HDBSCAN, AgglomerativeClustering, EmbeddingCluster
-- **EmbeddingCluster** — purpose-built pipeline for OpenAI/Cohere/Voyage embeddings (L2-normalize → PCA → spherical K-means)
-- **EmbeddingReducer** — standalone PCA transformer with save/load (fit once, cluster for free)
-- **faer-accelerated PCA** — 11x faster than hand-rolled matmul via SIMD-optimized GEMM
+- **EmbeddingCluster**: purpose-built pipeline for OpenAI/Cohere/Voyage embeddings (L2-normalize, PCA, spherical K-means)
+- **EmbeddingReducer**: standalone PCA transformer with save/load (fit once, cluster for free), chunked transform, sample-fit, and an f32 fast path that halves working-set memory
+- **`rustcluster.utils.extract_embeddings_from_spark`**: stream a Spark DataFrame into NumPy via Arrow, no Python list-of-lists overhead
+- **`rustcluster.index`**: FAISS-flavored flat vector search (`IndexFlatL2`, `IndexFlatIP`) plus a fused all-pairs `similarity_graph` kernel
+- **faer-accelerated PCA**: 11x faster than hand-rolled matmul via SIMD-optimized GEMM
 - **3 distance metrics**: euclidean, cosine, manhattan
 - **3 evaluation metrics**: silhouette score, Calinski-Harabasz, Davies-Bouldin
 - **KD-tree acceleration** for DBSCAN/HDBSCAN neighbor queries (10-200x on low-d data)
-- **Native f32/f64** — no silent upcast, doubles cache efficiency with f32
-- **Cluster slotting** — snapshot fitted clusters, assign new points 100x faster than refitting
+- **Native f32/f64**: no silent upcast, doubles cache efficiency with f32
+- **Cluster slotting**: snapshot fitted clusters, assign new points 100x faster than refitting
 - **Pickle serialization** for all fitted models
-- **GIL released** during all compute — plays well with threads and async
-- **492 tests** across Rust and Python
+- **GIL released** during all compute, plays well with threads and async
+- **631 tests** across Rust (237) and Python (394) suites
 
 ## Installation
 
@@ -55,7 +57,7 @@ Purpose-built pipeline for dense embedding vectors (OpenAI, Cohere, Voyage, etc.
 from rustcluster.experimental import EmbeddingCluster
 
 model = EmbeddingCluster(n_clusters=50, reduction_dim=128)
-model.fit(embeddings)          # L2-normalize → PCA → spherical K-means
+model.fit(embeddings)          # L2-normalize, PCA, spherical K-means
 model.labels_                  # cluster assignments
 model.cluster_centers_         # unit-norm centroids in reduced space
 model.intra_similarity_        # per-cluster cosine similarity
@@ -71,7 +73,7 @@ from rustcluster.experimental import EmbeddingReducer
 
 # Pay the PCA cost once
 reducer = EmbeddingReducer(target_dim=128)
-X_reduced = reducer.fit_transform(embeddings)  # 323K × 1536 → 128 in ~56s
+X_reduced = reducer.fit_transform(embeddings)  # 323K x 1536 -> 128 in ~56s
 reducer.save("pca_128.bin")
 
 # Iterate on clustering for free
@@ -87,14 +89,37 @@ Matryoshka models (e.g., text-embedding-3-small) can skip PCA entirely:
 
 ```python
 reducer = EmbeddingReducer(target_dim=128, method="matryoshka")
-X_reduced = reducer.fit_transform(embeddings)  # instant — just truncates + L2-normalizes
+X_reduced = reducer.fit_transform(embeddings)  # instant: column slice + L2-normalize
 ```
+
+**Memory-optimized end-to-end workflow** (v0.7.0). Runs on a 28 GB Databricks driver without manual chunking:
+
+```python
+from rustcluster.utils import extract_embeddings_from_spark
+from rustcluster.experimental import EmbeddingReducer, EmbeddingCluster
+
+# Stream embeddings from Spark with no Python list-of-lists overhead
+embeddings, pdf = extract_embeddings_from_spark(
+    df,
+    embedding_col="embedding",
+    metadata_cols=["supplier_id", "commodity"],
+    dtype=np.float32,
+)
+
+# Fit on a 50K sample, transform all 312K in chunks, f32 throughout
+reducer = EmbeddingReducer(target_dim=128, fit_sample_size=50_000)
+X = reducer.fit_transform(embeddings, chunk_size=50_000)
+
+model = EmbeddingCluster(n_clusters=20, reduction_dim=None).fit(X)
+```
+
+Output dtype tracks input dtype: float32 in, float32 out. (Prior to v0.7.0 the output was always upcast to float64.)
 
 See the [embedding clustering guide](docs/embedding-clustering-guide.md) for full documentation.
 
 ### Cluster Slotting (Incremental Assignment)
 
-Fit once, assign new data forever. Snapshot freezes cluster centroids — new points are assigned without re-clustering:
+Fit once, assign new data forever. Snapshot freezes cluster centroids; new points are assigned without re-clustering:
 
 ```python
 from rustcluster import KMeans, ClusterSnapshot
@@ -116,7 +141,7 @@ Works with KMeans, MiniBatchKMeans, and EmbeddingCluster. EmbeddingCluster snaps
 ```python
 result = snapshot.assign_with_scores(X_new, confidence_threshold=0.3)
 result.labels_       # -1 for rejected points
-result.confidences_  # [0, 1) — higher means more decisive assignment
+result.confidences_  # [0, 1); higher means more decisive assignment
 result.distances_    # distance to nearest centroid
 result.rejected_     # boolean mask
 ```
@@ -148,7 +173,7 @@ report.rejection_rate_        # fraction of points beyond per-cluster bounds (re
 
 `rejection_rate_` is NaN until `snapshot.calibrate(X_train)` is called. The per-cluster bounds come from the calibration distribution, not the fit-time data.
 
-**Hierarchical slotting (v2):** Cascading snapshots for multi-level classification (e.g., commodity → sub-commodity):
+**Hierarchical slotting (v2):** Cascading snapshots for multi-level classification (e.g., commodity, then sub-commodity):
 
 ```python
 from rustcluster.experimental import HierarchicalSnapshot
@@ -260,6 +285,15 @@ Measured on 323K embeddings (text-embedding-3-small, 1536d → 128d, K=98, Apple
 | 5 clustering configs on cached data | **74s** |
 | Matryoshka (no PCA needed) | **~5s** |
 
+**Memory** (v0.7.0, 312K x 1536d -> 128d on a 28 GB Databricks driver):
+
+| Stage | v0.6.x | v0.7.0 |
+|---|---|---|
+| Arrow extraction from Spark | ~5 GB | ~2 GB |
+| PCA fit | 3.8 GB centered matrix | ~300 MB (sample-fit + f32) |
+| PCA transform | 3.8 GB peak | ~300 MB per chunk (f32) |
+| **Total Python peak** | **~8-9 GB** | **~1.5-3 GB** |
+
 Full benchmarks: `python benches/benchmark.py`
 
 ## Serialization
@@ -293,8 +327,8 @@ snapshot = ClusterSnapshot.load("clusters/")   # zero-copy load
 
 ```bash
 maturin develop --release              # build
-cargo test --no-default-features --lib # Rust tests (208)
-pytest tests/ -v                       # Python tests (284)
+cargo test --no-default-features --lib # Rust tests (237)
+pytest tests/ -v                       # Python tests (394, + 6 opt-in perf via -m perf)
 python benches/benchmark.py            # benchmark vs sklearn
 cargo fmt -- --check                   # formatting
 cargo clippy --no-default-features --lib -- -D warnings  # linting
@@ -304,13 +338,13 @@ cargo clippy --no-default-features --lib -- -D warnings  # linting
 
 Three-layer kernel design separating concerns:
 
-1. **PyO3 boundary** (`src/lib.rs`) — input validation, GIL release, dtype dispatch
-2. **Algorithm logic** (`src/kmeans.rs`, etc.) — iteration, convergence, ndarray types
-3. **Hot kernel** (`src/utils.rs`, `src/distance.rs`) — raw `&[F]` slices for auto-vectorization
+1. **PyO3 boundary** (`src/lib.rs`): input validation, GIL release, dtype dispatch
+2. **Algorithm logic** (`src/kmeans.rs`, `src/snapshot/`, etc.): iteration, convergence, ndarray types
+3. **Hot kernel** (`src/utils.rs`, `src/distance.rs`): raw `&[F]` slices for auto-vectorization
 
 The embedding pipeline adds:
 
-4. **Embedding module** (`src/embedding/`) — spherical K-means, PCA (faer-backed), vMF refinement, EmbeddingReducer
+4. **Embedding module** (`src/embedding/`): spherical K-means, PCA (faer-backed), vMF refinement, EmbeddingReducer
 
 See [docs/architecture-decisions.md](docs/architecture-decisions.md) for details and [docs/lessons-building-rustcluster.md](docs/lessons-building-rustcluster.md) for the full build story.
 
