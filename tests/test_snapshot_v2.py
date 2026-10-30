@@ -268,3 +268,52 @@ class TestHierarchicalSnapshot:
         # If rejected at root, child should also be rejected
         if result.root_rejected[0]:
             assert result.child_rejected[0]
+
+
+def _tied_categorical(seed=0, n=248):
+    """One-hot categorical rows (8 types, 1-3 variants each): many rows are identical, so many
+    confidences tie exactly at a cluster's calibration percentile."""
+    rng = np.random.default_rng(seed)
+    spec = [(1, 2), (1, 2), (1, 1), (1, 3), (1, 2), (1, 1), (2, 2), (1, 1)]
+    offs, cols = [], 0
+    for v, m in spec:
+        offs.append(cols)
+        cols += v + m + 2
+    X = np.zeros((n, cols))
+    for i in range(n):
+        t = i % 8
+        v, m = spec[t]
+        o = offs[t]
+        X[i, o] = 1.0
+        X[i, o + 1 + rng.integers(v)] = 1.0
+        X[i, o + 1 + v + rng.integers(m)] = 0.5
+        X[i, o + 1 + v + m] = 1.0
+    return X
+
+
+class TestAdaptiveRoundtripTiedData:
+    """Issue #13: adaptive rejection must not change across save()/load()."""
+
+    @pytest.mark.parametrize("seed,k", [(0, 8), (1, 8), (2, 10), (4, 10)])
+    @pytest.mark.parametrize("percentile", ["p5", "p10", "p25", "p50"])
+    def test_adaptive_identical_after_save_load(self, seed, k, percentile):
+        X = _tied_categorical(seed)
+        snap = KMeans(n_clusters=k, random_state=0, n_init=10).fit(X).snapshot()
+        snap.calibrate(X)
+        with tempfile.TemporaryDirectory() as d:
+            snap.save(os.path.join(d, "s"))
+            loaded = ClusterSnapshot.load(os.path.join(d, "s"))
+        kw = {"adaptive_threshold": True, "adaptive_percentile": percentile}
+        a, b = snap.assign_with_scores(X, **kw), loaded.assign_with_scores(X, **kw)
+        np.testing.assert_array_equal(a.rejected_, b.rejected_)
+        np.testing.assert_array_equal(a.labels_, b.labels_)
+
+    def test_metadata_stable_across_save_load_save(self):
+        X = _tied_categorical(0)
+        snap = KMeans(n_clusters=8, random_state=0, n_init=10).fit(X).snapshot()
+        snap.calibrate(X)
+        with tempfile.TemporaryDirectory() as d:
+            snap.save(os.path.join(d, "a"))
+            ClusterSnapshot.load(os.path.join(d, "a")).save(os.path.join(d, "b"))
+            with open(os.path.join(d, "a", "metadata.json")) as fa, open(os.path.join(d, "b", "metadata.json")) as fb:
+                assert fa.read() == fb.read()
