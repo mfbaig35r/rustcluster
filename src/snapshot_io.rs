@@ -478,16 +478,13 @@ mod tests {
         save_snapshot(&snap, path_str).unwrap();
         let loaded = load_snapshot(path_str).unwrap();
 
-        // Confidence stats should round-trip (approx due to JSON float serialization)
+        // Confidence stats must round-trip exactly (#13): a one-ULP drift changes adaptive
+        // rejection for points tied at the threshold.
         assert!(loaded.confidence_stats.is_some());
         let orig = snap.confidence_stats.as_ref().unwrap();
         let load = loaded.confidence_stats.as_ref().unwrap();
-        for (a, b) in orig.p10.iter().zip(load.p10.iter()) {
-            assert!((a - b).abs() < 1e-12, "p10 mismatch: {a} vs {b}");
-        }
-        for (a, b) in orig.p50.iter().zip(load.p50.iter()) {
-            assert!((a - b).abs() < 1e-12, "p50 mismatch: {a} vs {b}");
-        }
+        assert_bits_eq("p10", &orig.p10, &load.p10);
+        assert_bits_eq("p50", &orig.p50, &load.p50);
         assert_eq!(loaded.version, 2);
     }
 
@@ -516,5 +513,96 @@ mod tests {
         assert!(loaded.confidence_stats.is_none());
         assert!(loaded.cluster_variances.is_none());
         assert!(loaded.fit_kappa.is_none());
+    }
+
+    /// Floats that a non-round-tripping JSON float parser reads back one ULP off. The first is
+    /// the calibration threshold from issue #13.
+    const TRICKY_F64: [f64; 6] = [
+        0.9713350437936831,
+        0.8813531488627966,
+        0.9800937804122799,
+        0.10299955694479937,
+        0.1 + 0.2,
+        1.0 - f64::EPSILON,
+    ];
+
+    fn lcg_f64s(n: usize) -> Vec<f64> {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..n)
+            .map(|_| {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (x >> 11) as f64 / (1u64 << 53) as f64
+            })
+            .collect()
+    }
+
+    fn assert_bits_eq(name: &str, a: &[f64], b: &[f64]) {
+        assert_eq!(a.len(), b.len(), "{name}: length differs");
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "{name}[{i}]: {x:?} saved, {y:?} loaded"
+            );
+        }
+    }
+
+    /// Issue #13: every f64 in metadata.json must survive save -> load bit for bit, otherwise
+    /// adaptive rejection changes after a round trip for points tied at a threshold.
+    #[test]
+    fn test_metadata_floats_roundtrip_bit_exact() {
+        let mut values = TRICKY_F64.to_vec();
+        values.extend(lcg_f64s(2000));
+        let k = values.len();
+        let mut snap = make_test_snapshot();
+        snap.k = k;
+        snap.d = 1;
+        snap.input_dim = 1;
+        snap.centroids = Arc::new(values.clone());
+        snap.fit_mean_distances = values.clone();
+        snap.fit_cluster_sizes = vec![1; k];
+        snap.version = 2;
+        snap.confidence_stats = Some(ClusterConfidenceStats {
+            p5: values.clone(),
+            p10: values.clone(),
+            p25: values.clone(),
+            p50: values.clone(),
+        });
+        snap.fit_distance_stats = Some(ClusterDistanceStats {
+            mean: values.clone(),
+            std: values.clone(),
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        save_snapshot(&snap, first.to_str().unwrap()).unwrap();
+        let loaded = load_snapshot(first.to_str().unwrap()).unwrap();
+
+        let a = snap.confidence_stats.as_ref().unwrap();
+        let b = loaded.confidence_stats.as_ref().unwrap();
+        assert_bits_eq("p5", &a.p5, &b.p5);
+        assert_bits_eq("p10", &a.p10, &b.p10);
+        assert_bits_eq("p25", &a.p25, &b.p25);
+        assert_bits_eq("p50", &a.p50, &b.p50);
+        assert_bits_eq(
+            "fit_mean_distances",
+            &snap.fit_mean_distances,
+            &loaded.fit_mean_distances,
+        );
+        let (da, db) = (
+            snap.fit_distance_stats.as_ref().unwrap(),
+            loaded.fit_distance_stats.as_ref().unwrap(),
+        );
+        assert_bits_eq("fit_distance_mean", &da.mean, &db.mean);
+        assert_bits_eq("fit_distance_std", &da.std, &db.std);
+
+        // Saving the loaded snapshot again must reproduce the same metadata file exactly.
+        save_snapshot(&loaded, second.to_str().unwrap()).unwrap();
+        let m1 = fs::read_to_string(first.join("metadata.json")).unwrap();
+        let m2 = fs::read_to_string(second.join("metadata.json")).unwrap();
+        assert_eq!(m1, m2, "metadata.json changed across save -> load -> save");
     }
 }
